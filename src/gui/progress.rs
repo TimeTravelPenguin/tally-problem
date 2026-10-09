@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, time::Duration};
 
-use tally_problem::{SearchStatistics, TallyCounter};
+use tally_problem::{SearchStatistics, TallyCounter, increment_lower_bound};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(50);
 const WARMUP: Duration = Duration::from_millis(250);
@@ -20,6 +20,7 @@ pub(crate) struct TimingPrediction {
 /// withdraw the prediction when the search no longer fits the calibrated cases.
 #[derive(Debug, Clone)]
 pub(crate) struct ProgressEstimate {
+    minimum_increments: Option<u64>,
     initial_work: Option<f64>,
     total_work: Option<f64>,
     latest: SearchStatistics,
@@ -40,6 +41,7 @@ impl ProgressEstimate {
         let initial_work = estimate_work(counter.values(), target);
 
         Self {
+            minimum_increments: increment_lower_bound(counter, target).ok(),
             initial_work,
             total_work: initial_work,
             latest: SearchStatistics::default(),
@@ -51,6 +53,11 @@ impl ProgressEstimate {
             }]),
             exceeded: false,
         }
+    }
+
+    /// Guaranteed minimum increments, independent of timing samples or estimates.
+    pub(crate) fn minimum_increments(&self) -> Option<u64> {
+        self.minimum_increments
     }
 
     pub(crate) fn update(&mut self, statistics: SearchStatistics, elapsed: Duration) {
@@ -290,6 +297,14 @@ mod tests {
         let counter = TallyCounter::new(7).unwrap();
         let restarted = ProgressEstimate::new(&counter, &[9, 8, 7, 6, 5, 4, 3]);
         assert!(restarted.prediction().is_none());
+    }
+
+    #[test]
+    fn mathematical_bounds_remain_available_without_a_timing_prediction() {
+        let counter = TallyCounter::new(12).unwrap();
+        let estimate = ProgressEstimate::new(&counter, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9]);
+        assert_eq!(estimate.minimum_increments(), Some(143));
+        assert!(estimate.prediction().is_none());
     }
 
     #[test]

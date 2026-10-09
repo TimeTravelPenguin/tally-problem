@@ -841,6 +841,25 @@ impl Planner {
         ]
         .spacing(12);
 
+        if let Some(minimum) = job
+            .estimate
+            .minimum_increments()
+            .filter(|&minimum| minimum > 0)
+        {
+            content = content.push(
+                text(format!(
+                    "At least {minimum} {} required",
+                    if minimum == 1 {
+                        "increment"
+                    } else {
+                        "increments"
+                    },
+                ))
+                .size(13)
+                .style(text::secondary),
+            );
+        }
+
         if let Some(prediction) = prediction {
             content = content.push(
                 text(format!(
