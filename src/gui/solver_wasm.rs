@@ -1,15 +1,20 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use iced::Task;
 use iced::futures::channel::mpsc;
 use js_sys::{Array, Uint8Array};
-use tally_problem::{Action, SearchProgress, SearchResult, TallyCounter};
+use tally_problem::{Action, SearchProgress, SearchResult, SearchStatistics, TallyCounter};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use web_sys::{ErrorEvent, MessageEvent, Url, Worker};
 
-type Update = Result<SearchProgress, String>;
-type Sender = Rc<RefCell<Option<mpsc::UnboundedSender<Update>>>>;
+use super::Update;
+
+type Response = Result<Update, String>;
+type Sender = Rc<RefCell<Option<mpsc::UnboundedSender<Response>>>>;
+
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 /// Owns the worker and its callbacks. Dropping a job immediately stops its CPU
 /// work and releases the worker's WASM memory, even during initialization.
@@ -34,7 +39,7 @@ impl Drop for Control {
     }
 }
 
-pub fn start(counter: TallyCounter, target: Vec<u8>) -> (Control, Task<Update>) {
+pub fn start(counter: TallyCounter, target: Vec<u8>) -> (Control, Task<Response>) {
     let (sender, receiver) = mpsc::unbounded();
     let sender = Rc::new(RefCell::new(Some(sender)));
     let mut control = Control {
@@ -55,6 +60,7 @@ pub fn start(counter: TallyCounter, target: Vec<u8>) -> (Control, Task<Update>) 
     };
 
     let request = Array::new();
+    request.push(&JsValue::from_str("search-v1"));
     request.push(&Uint8Array::from(counter.values()));
     request.push(&Uint8Array::from(target.as_slice()));
     request.push(&JsValue::from(counter.reset_index()));
@@ -127,8 +133,14 @@ fn create_worker() -> Result<Worker, String> {
         .map_err(|error| format!("Unable to start the background solver: {}", js_error(error)))
 }
 
-fn publish(sender: &Sender, update: Update) {
-    let complete = !matches!(update, Ok(SearchProgress::InProgress { .. }));
+fn publish(sender: &Sender, update: Response) {
+    let complete = !matches!(
+        update,
+        Ok(Update {
+            progress: SearchProgress::InProgress { .. },
+            ..
+        })
+    );
 
     if complete {
         if let Some(sender) = sender.borrow_mut().take() {
@@ -139,7 +151,7 @@ fn publish(sender: &Sender, update: Update) {
     }
 }
 
-fn decode_update(data: JsValue) -> Update {
+fn decode_update(data: JsValue) -> Response {
     if !Array::is_array(&data) {
         return Err("The background solver returned an invalid response.".to_owned());
     }
@@ -147,19 +159,40 @@ fn decode_update(data: JsValue) -> Update {
     let response = Array::from(&data);
 
     match response.get(0).as_string().as_deref() {
-        Some("progress") => {
-            let visited_states = response
+        // The bootstrap can fail before Rust installs the versioned protocol.
+        Some("error" | "error-v1") => {
+            return Err(response
                 .get(1)
-                .as_f64()
-                .filter(|count| count.is_finite() && *count >= 0.0)
-                .ok_or_else(|| "The background solver returned invalid progress.".to_owned())?
-                as usize;
+                .as_string()
+                .unwrap_or_else(|| "The background solver failed.".to_owned()));
+        }
 
-            Ok(SearchProgress::InProgress { visited_states })
+        Some("update-v1") if response.length() == 5 => {}
+        _ => return Err("The background solver returned an unknown response.".to_owned()),
+    }
+
+    let statistics = decode_statistics(response.get(3))?;
+    let elapsed_ms = response
+        .get(4)
+        .as_f64()
+        .filter(|elapsed| elapsed.is_finite() && (0.0..=MAX_SAFE_INTEGER).contains(elapsed))
+        .ok_or_else(|| "The background solver returned invalid timing.".to_owned())?;
+    let elapsed = Duration::try_from_secs_f64(elapsed_ms / 1000.0)
+        .map_err(|_| "The background solver returned invalid timing.".to_owned())?;
+
+    let progress = match response.get(1).as_string().as_deref() {
+        Some("progress") => {
+            let visited_states = decode_count(response.get(2))?;
+
+            if visited_states != statistics.visited_groups {
+                return Err("The background solver returned inconsistent progress.".to_owned());
+            }
+
+            SearchProgress::InProgress { visited_states }
         }
 
         Some("found") => {
-            let encoded = response.get(1);
+            let encoded = response.get(2);
 
             if !Array::is_array(&encoded) {
                 return Err("The background solver returned invalid actions.".to_owned());
@@ -173,11 +206,12 @@ fn decode_update(data: JsValue) -> Update {
                 }
 
                 let encoded_action = Array::from(&encoded_action);
-                let ticks = encoded_action
-                    .get(1)
-                    .as_string()
-                    .and_then(|ticks| ticks.parse::<u64>().ok())
-                    .ok_or_else(|| "The background solver returned invalid ticks.".to_owned())?;
+
+                if encoded_action.length() != 2 {
+                    return Err("The background solver returned an invalid action.".to_owned());
+                }
+
+                let ticks = decode_u64(encoded_action.get(1))?;
 
                 let action = match encoded_action.get(0).as_string().as_deref() {
                     Some("increment") => Action::Increment(ticks),
@@ -189,16 +223,59 @@ fn decode_update(data: JsValue) -> Update {
                 actions.push(action);
             }
 
-            Ok(SearchProgress::Complete(SearchResult::Found(actions)))
+            SearchProgress::Complete(SearchResult::Found(actions))
         }
 
-        Some("not-found") => Ok(SearchProgress::Complete(SearchResult::NotFound)),
-        Some("error") => Err(response
-            .get(1)
-            .as_string()
-            .unwrap_or_else(|| "The background solver failed.".to_owned())),
-        _ => Err("The background solver returned an unknown response.".to_owned()),
+        Some("not-found") => SearchProgress::Complete(SearchResult::NotFound),
+        _ => return Err("The background solver returned an unknown response.".to_owned()),
+    };
+
+    Ok(Update {
+        progress,
+        statistics,
+        elapsed,
+    })
+}
+
+fn decode_statistics(data: JsValue) -> Result<SearchStatistics, String> {
+    if !Array::is_array(&data) {
+        return Err("The background solver returned invalid statistics.".to_owned());
     }
+
+    let statistics = Array::from(&data);
+
+    if statistics.length() != 6 {
+        return Err("The background solver returned invalid statistics.".to_owned());
+    }
+
+    Ok(SearchStatistics {
+        visited_groups: decode_count(statistics.get(0))?,
+        increment_layer: decode_u64(statistics.get(1))?,
+        reset_ticks: decode_u64(statistics.get(2))?,
+        diagram_nodes: decode_count(statistics.get(3))?,
+        diagram_work: decode_u64(statistics.get(4))?,
+        queued_groups: decode_count(statistics.get(5))?,
+    })
+}
+
+fn decode_count(value: JsValue) -> Result<usize, String> {
+    value
+        .as_f64()
+        .filter(|count| {
+            count.is_finite()
+                && count.fract() == 0.0
+                && (0.0..=MAX_SAFE_INTEGER.min(usize::MAX as f64)).contains(count)
+        })
+        .map(|count| count as usize)
+        .ok_or_else(|| "The background solver returned an invalid group count.".to_owned())
+}
+
+fn decode_u64(value: JsValue) -> Result<u64, String> {
+    value
+        .as_string()
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit()))
+        .and_then(|digits| digits.parse().ok())
+        .ok_or_else(|| "The background solver returned an invalid integer.".to_owned())
 }
 
 fn js_error(error: JsValue) -> String {

@@ -1,13 +1,17 @@
+use std::time::Duration;
+
 use iced::keyboard::{self, Key, key::Named};
+use iced::time::Instant;
 use iced::widget::{
-    button, column, container, operation, responsive, row, scrollable, space, text, text_input,
-    tooltip,
+    button, column, container, operation, progress_bar, responsive, row, scrollable, sensor, space,
+    text, text_input, tooltip,
 };
-use iced::{Border, Color, Element, Event, Fill, Subscription, Task, Theme, event, mouse};
-use tally_problem::{Action, SearchProgress};
+use iced::{Border, Color, Element, Event, Fill, Length, Subscription, Task, Theme, event, mouse};
+use tally_problem::{Action, SearchProgress, SearchStatistics};
 
 use crate::focus;
 use crate::model::{Form, PreparedSearch, Solution, Step};
+use crate::progress::{ProgressEstimate, TimingPrediction};
 use crate::solver;
 
 const PAGE: &str = "planner-page";
@@ -49,13 +53,17 @@ impl Focus {
     fn help(self) -> Option<&'static str> {
         match self {
             Self::Target => Some(
-                "The value to reach, using one or more decimal digits. Leading zeros set the counter width: 0012 uses four digits. Larger counters may take longer to solve.",
+                "The value to reach, using one or more decimal digits. \
+                Leading zeros set the counter width: 0012 uses four digits. \
+                Larger counters may take longer to solve.",
             ),
             Self::Start => Some(
-                "The counter's current digits. Leave blank to start at zero, or enter the same number of digits as the target, including leading zeros.",
+                "The counter's current digits. Leave blank to start at zero, \
+                or enter the same number of digits as the target, including leading zeros.",
             ),
             Self::ResetIndex => Some(
-                "The current knob position (0–9). It determines which digits the next forward reset pushes; it is not the number of reset ticks.",
+                "The current knob position (0–9). It determines which digits the next forward \
+                reset pushes; it is not the number of reset ticks.",
             ),
             Self::Solve | Self::ResetForm | Self::Results | Self::Video => None,
         }
@@ -74,6 +82,22 @@ impl Focus {
 struct Job {
     _control: solver::Control,
     prepared: PreparedSearch,
+    started_at: Instant,
+    elapsed: Duration,
+    estimate: ProgressEstimate,
+    statistics: SearchStatistics,
+    reported_at: Option<Instant>,
+}
+
+impl Job {
+    fn timing_prediction(&self) -> Option<TimingPrediction> {
+        // A long batch can outlive the prediction from its preceding report.
+        if self.reported_at?.elapsed() > Duration::from_secs(2) {
+            return None;
+        }
+
+        self.estimate.prediction()
+    }
 }
 
 pub struct Planner {
@@ -83,6 +107,7 @@ pub struct Planner {
     job: Option<Job>,
     generation: u64,
     visited_states: usize,
+    completed_elapsed: Option<Duration>,
     solution: Option<Solution>,
     error: Option<String>,
     video_error: Option<String>,
@@ -97,7 +122,8 @@ pub enum Message {
     SolvePressed,
     ResetForm,
     OpenVideo,
-    Progress(u64, Result<SearchProgress, String>),
+    Progress(u64, Result<solver::Update, String>),
+    SearchFrame(u64, Instant),
     KeyPressed(Key, keyboard::Modifiers),
     PointerPressed,
     InputFocused(u64, &'static str, bool),
@@ -114,6 +140,7 @@ impl Planner {
                 job: None,
                 generation: 0,
                 visited_states: 0,
+                completed_elapsed: None,
                 solution: None,
                 error: None,
                 video_error: None,
@@ -201,14 +228,33 @@ impl Planner {
                 }
 
                 match progress {
-                    Ok(SearchProgress::InProgress { visited_states }) => {
+                    Ok(solver::Update {
+                        progress: SearchProgress::InProgress { visited_states },
+                        statistics,
+                        elapsed,
+                    }) => {
                         self.visited_states = visited_states;
+
+                        if let Some(job) = &mut self.job {
+                            job.statistics = statistics;
+                            job.reported_at = Some(Instant::now());
+                            job.estimate.update(statistics, elapsed);
+                        }
                     }
 
-                    Ok(SearchProgress::Complete(result)) => {
+                    Ok(solver::Update {
+                        progress: SearchProgress::Complete(result),
+                        ..
+                    }) => {
                         if let Some(job) = self.job.take() {
+                            let elapsed = job.elapsed.max(job.started_at.elapsed());
+
                             match job.prepared.finish(result) {
-                                Ok(solution) => self.solution = Some(solution),
+                                Ok(solution) => {
+                                    self.solution = Some(solution);
+                                    self.completed_elapsed = Some(elapsed);
+                                }
+
                                 Err(error) => self.error = Some(error),
                             }
                         }
@@ -218,6 +264,16 @@ impl Planner {
                         self.job = None;
                         self.error = Some(error);
                     }
+                }
+            }
+
+            Message::SearchFrame(generation, now) => {
+                if generation == self.generation
+                    && let Some(job) = &mut self.job
+                {
+                    job.elapsed = job
+                        .elapsed
+                        .max(now.saturating_duration_since(job.started_at));
                 }
             }
 
@@ -268,6 +324,7 @@ impl Planner {
         self.generation += 1;
         self.job = None;
         self.visited_states = 0;
+        self.completed_elapsed = None;
     }
 
     fn changed(&mut self, field: Focus) {
@@ -302,11 +359,18 @@ impl Planner {
         self.solution = None;
         self.error = None;
 
+        let started_at = Instant::now();
+        let estimate = ProgressEstimate::new(&prepared.counter, &prepared.target);
         let (control, task) = solver::start(prepared.counter.clone(), prepared.target.clone());
 
         self.job = Some(Job {
             _control: control,
             prepared,
+            started_at,
+            elapsed: Duration::ZERO,
+            estimate,
+            statistics: SearchStatistics::default(),
+            reported_at: None,
         });
 
         let generation = self.generation;
@@ -457,12 +521,8 @@ impl Planner {
                 self.results(solution, compact)
             } else if let Some(error) = &self.error {
                 card(column![text("Unable to find a sequence").size(20), text(error).style(text::danger)].spacing(12), false)
-            } else if self.job.is_some() {
-                card(column![
-                    text("Looking for the best path…").size(22),
-                    text(format!("{} state groups explored", self.visited_states)).style(text::secondary),
-                    text("You can cancel or change an input at any time.").size(13).style(text::secondary),
-                ].spacing(12), false)
+            } else if let Some(job) = &self.job {
+                self.searching(job, compact)
             } else {
                 card(column![
                     text("Your sequence will appear here").size(22),
@@ -482,6 +542,96 @@ impl Planner {
 
             scrollable(page).id(PAGE).width(Fill).height(Fill).into()
         }).into()
+    }
+
+    fn searching(&self, job: &Job, compact: bool) -> Element<'_, Message> {
+        let generation = self.generation;
+        let prediction = job.timing_prediction();
+        let interval = if prediction.is_some() { 1_000 } else { 50 };
+        // The sensor's redraw timer keeps elapsed time and fallback activity
+        // independent of slow solver batches, on both desktop and browser.
+        let elapsed = sensor(
+            text(format!("Elapsed {}", elapsed_label(job.elapsed)))
+                .size(14)
+                .style(text::secondary),
+        )
+        .key((generation, job.elapsed.as_millis() / interval, interval))
+        .delay(Duration::from_millis(interval as u64))
+        .on_show(move |_| Message::SearchFrame(generation, Instant::now()));
+        let estimate_label = prediction.map_or_else(
+            || "Timing estimate uncertain".to_owned(),
+            |prediction| format!("Estimated {:.0}%", prediction.percent),
+        );
+        let estimate = tooltip(
+            text(estimate_label).size(14).style(text::secondary),
+            container(
+                text(
+                    "Timing estimates adapt to measured diagram work and search timings. \
+                    The percentage can move backwards as more work is discovered. \
+                    When the prediction is uncertain, the bar shows activity instead. \
+                    100% means the search has finished.",
+                )
+                .size(13),
+            )
+            .width(280),
+            tooltip::Position::Top,
+        )
+        .gap(8)
+        .padding(10)
+        .snap_within_viewport(true)
+        .style(container::rounded_box);
+        let timing: Element<'_, Message> = if compact {
+            column![elapsed, estimate].spacing(6).into()
+        } else {
+            row![elapsed, space().width(Fill), estimate].into()
+        };
+
+        let bar = prediction.map_or_else(
+            || activity_bar(job.elapsed),
+            |prediction| search_bar(prediction.percent, false),
+        );
+        let milestone = if job.reported_at.is_some() {
+            let increments = job.statistics.increment_layer;
+
+            format!(
+                "Checking paths with {increments} {}",
+                if increments == 1 {
+                    "increment"
+                } else {
+                    "increments"
+                },
+            )
+        } else {
+            "Preparing the search…".to_owned()
+        };
+        let mut content = column![
+            text("Looking for the best path…").size(22),
+            bar,
+            timing,
+            text(milestone).size(14),
+            text(format!("{} state groups explored", self.visited_states)).style(text::secondary),
+        ]
+        .spacing(12);
+
+        if let Some(prediction) = prediction {
+            content = content.push(
+                text(format!(
+                    "Estimated remaining {}",
+                    elapsed_label(prediction.remaining.max(Duration::from_secs(1))),
+                ))
+                .size(13)
+                .style(text::secondary),
+            );
+        }
+
+        card(
+            content.push(
+                text("You can cancel or change an input at any time.")
+                    .size(13)
+                    .style(text::secondary),
+            ),
+            false,
+        )
     }
 
     fn about(&self) -> Element<'_, Message> {
@@ -564,13 +714,109 @@ impl Planner {
             steps = steps.push(solution_step(index + 1, step, compact));
         }
 
-        column![
-            statistics,
-            container(card(steps, self.focus == Some(Focus::Results))).id(Focus::Results.id()),
-        ]
-        .spacing(20)
-        .into()
+        let mut results = column![].spacing(20);
+
+        if let Some(elapsed) = self.completed_elapsed {
+            results = results.push(
+                column![
+                    row![
+                        text("Complete · 100%").size(14).style(text::success),
+                        space().width(Fill),
+                        text(format!("Elapsed {}", elapsed_label(elapsed)))
+                            .size(14)
+                            .style(text::secondary),
+                    ],
+                    search_bar(100.0, true),
+                ]
+                .spacing(8),
+            );
+        }
+
+        results
+            .push(statistics)
+            .push(
+                container(card(steps, self.focus == Some(Focus::Results))).id(Focus::Results.id()),
+            )
+            .into()
     }
+}
+
+fn elapsed_label(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let minutes = seconds / 60;
+
+    if minutes < 60 {
+        format!("{minutes}:{:02}", seconds % 60)
+    } else {
+        format!("{}:{:02}:{:02}", minutes / 60, minutes % 60, seconds % 60)
+    }
+}
+
+fn search_bar(percent: f32, completed: bool) -> Element<'static, Message> {
+    progress_bar(0.0..=100.0, percent)
+        .length(Fill)
+        .girth(8)
+        .style(move |theme: &Theme| {
+            let palette = theme.extended_palette();
+
+            progress_bar::Style {
+                background: palette.background.strong.color.into(),
+                bar: if completed {
+                    palette.success.base.color
+                } else {
+                    palette.primary.base.color
+                }
+                .into(),
+                border: Border {
+                    radius: 4.0.into(),
+                    ..Border::default()
+                },
+            }
+        })
+        .into()
+}
+
+fn activity_bar(elapsed: Duration) -> Element<'static, Message> {
+    let phase = (elapsed.as_secs_f64() / 2.4).fract();
+    let position = 1.0 - (2.0 * phase - 1.0).abs();
+    let leading = (position * 800.0).round() as u16;
+    let trailing = 800 - leading;
+    let mut bar = row![];
+
+    if leading > 0 {
+        bar = bar.push(space().width(Length::FillPortion(leading)));
+    }
+
+    bar = bar.push(
+        container(space())
+            .width(Length::FillPortion(200))
+            .height(8)
+            .style(|theme: &Theme| container::Style {
+                background: Some(theme.extended_palette().primary.base.color.into()),
+                border: Border {
+                    radius: 4.0.into(),
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            }),
+    );
+
+    if trailing > 0 {
+        bar = bar.push(space().width(Length::FillPortion(trailing)));
+    }
+
+    container(bar)
+        .width(Fill)
+        .height(8)
+        .style(|theme: &Theme| container::Style {
+            background: Some(theme.extended_palette().background.strong.color.into()),
+            border: Border {
+                radius: 4.0.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -764,6 +1010,26 @@ fn step_row<'a>(
 mod tests {
     use super::*;
 
+    fn report(progress: SearchProgress) -> solver::Update {
+        let visited_groups = match &progress {
+            SearchProgress::InProgress { visited_states } => *visited_states,
+            SearchProgress::Complete(_) => 0,
+        };
+
+        solver::Update {
+            progress,
+            statistics: SearchStatistics {
+                visited_groups,
+                increment_layer: 2,
+                diagram_nodes: 1,
+                diagram_work: visited_groups as u64,
+                queued_groups: 1,
+                ..SearchStatistics::default()
+            },
+            elapsed: Duration::ZERO,
+        }
+    }
+
     #[test]
     fn tab_visits_fields_and_buttons_and_shift_tab_reverses() {
         let (mut planner, _) = Planner::new();
@@ -887,13 +1153,209 @@ mod tests {
         let _ = planner.update(Message::TargetChanged("12".to_owned()));
         let _ = planner.update(Message::Progress(
             generation,
-            Ok(SearchProgress::Complete(
+            Ok(report(SearchProgress::Complete(
                 tally_problem::SearchResult::Found(Vec::new()),
-            )),
+            ))),
         ));
 
         assert!(planner.job.is_none());
         assert!(planner.solution.is_none());
         assert_eq!(planner.form.target, "12");
+    }
+
+    #[test]
+    fn elapsed_clock_uses_frame_time_without_solver_reports_and_never_moves_backwards() {
+        let (mut planner, _) = Planner::new();
+        let _ = planner.solve();
+        let generation = planner.generation;
+        let started_at = planner.job.as_ref().unwrap().started_at;
+        let elapsed = Duration::from_secs(65);
+
+        let _ = planner.update(Message::SearchFrame(generation, started_at + elapsed));
+
+        assert_eq!(planner.job.as_ref().unwrap().elapsed, elapsed);
+        assert_eq!(planner.visited_states, 0);
+
+        let _ = planner.update(Message::SearchFrame(
+            generation,
+            started_at + Duration::from_secs(1),
+        ));
+        let _ = planner.update(Message::Progress(
+            generation,
+            Ok(report(SearchProgress::InProgress {
+                visited_states: 256,
+            })),
+        ));
+
+        assert_eq!(planner.job.as_ref().unwrap().elapsed, elapsed);
+        assert_eq!(planner.visited_states, 256);
+    }
+
+    #[test]
+    fn restarting_resets_clock_and_old_frames_cannot_update_new_or_finished_jobs() {
+        let (mut planner, _) = Planner::new();
+        let _ = planner.solve();
+        let old_generation = planner.generation;
+        let old_start = planner.job.as_ref().unwrap().started_at;
+        let old_frame = old_start + Duration::from_secs(120);
+        let _ = planner.update(Message::SearchFrame(old_generation, old_frame));
+        let _ = planner.update(Message::ResetForm);
+        let _ = planner.update(Message::SearchFrame(old_generation, old_frame));
+
+        assert!(planner.job.is_none());
+
+        let _ = planner.solve();
+        let generation = planner.generation;
+        let _ = planner.update(Message::SearchFrame(old_generation, old_frame));
+
+        assert_eq!(planner.job.as_ref().unwrap().elapsed, Duration::ZERO);
+        assert!(
+            planner
+                .job
+                .as_ref()
+                .unwrap()
+                .estimate
+                .prediction()
+                .is_none()
+        );
+
+        let _ = planner.update(Message::Progress(
+            generation,
+            Ok(report(SearchProgress::Complete(
+                tally_problem::SearchResult::NotFound,
+            ))),
+        ));
+        let _ = planner.update(Message::SearchFrame(generation, old_frame));
+
+        assert!(planner.job.is_none());
+        assert!(planner.completed_elapsed.is_none());
+        assert_eq!(
+            planner.error.as_deref(),
+            Some("This target is unreachable.")
+        );
+    }
+
+    #[test]
+    fn uncertain_timing_uses_search_milestones_and_only_completion_finishes_the_bar() {
+        let (mut planner, _) = Planner::new();
+        planner.form.target = "12".to_owned();
+        let _ = planner.solve();
+        let generation = planner.generation;
+        let started_at = planner.job.as_ref().unwrap().started_at;
+        let elapsed = Duration::from_secs(120);
+        let _ = planner.update(Message::SearchFrame(generation, started_at + elapsed));
+
+        assert!(
+            planner
+                .job
+                .as_ref()
+                .unwrap()
+                .estimate
+                .prediction()
+                .is_none()
+        );
+
+        let _ = planner.update(Message::Progress(
+            generation,
+            Ok(report(SearchProgress::InProgress { visited_states: 32 })),
+        ));
+        assert_eq!(planner.job.as_ref().unwrap().statistics.increment_layer, 2);
+        assert!(
+            planner
+                .job
+                .as_ref()
+                .unwrap()
+                .estimate
+                .prediction()
+                .is_none()
+        );
+        assert!(planner.completed_elapsed.is_none());
+
+        let _ = planner.update(Message::Progress(
+            generation,
+            Ok(report(SearchProgress::InProgress {
+                visited_states: usize::MAX,
+            })),
+        ));
+
+        assert!(
+            planner
+                .job
+                .as_ref()
+                .unwrap()
+                .estimate
+                .prediction()
+                .is_none_or(|prediction| prediction.percent <= 99.0)
+        );
+        assert!(planner.solution.is_none());
+
+        let _ = planner.update(Message::Progress(
+            generation,
+            Ok(report(SearchProgress::Complete(
+                tally_problem::SearchResult::Found(vec![
+                    Action::ResetForward(1),
+                    Action::Increment(1),
+                ]),
+            ))),
+        ));
+
+        assert!(planner.job.is_none());
+        assert!(planner.solution.is_some());
+        assert_eq!(planner.completed_elapsed, Some(elapsed));
+
+        let _ = planner.update(Message::TargetChanged("13".to_owned()));
+
+        assert!(planner.completed_elapsed.is_none());
+        assert!(planner.solution.is_none());
+    }
+
+    #[test]
+    fn stale_reports_cannot_set_a_restarted_jobs_search_milestone() {
+        let (mut planner, _) = Planner::new();
+        let _ = planner.solve();
+        let old_generation = planner.generation;
+        let _ = planner.update(Message::ResetForm);
+        let _ = planner.solve();
+        let _ = planner.update(Message::Progress(
+            old_generation,
+            Ok(report(SearchProgress::InProgress {
+                visited_states: 256,
+            })),
+        ));
+        let job = planner.job.as_ref().unwrap();
+
+        assert_eq!(job.statistics, SearchStatistics::default());
+        assert!(job.reported_at.is_none());
+        assert!(job.timing_prediction().is_none());
+        assert_eq!(planner.visited_states, 0);
+    }
+
+    #[test]
+    fn failed_search_cannot_show_completed_progress() {
+        let (mut planner, _) = Planner::new();
+        let _ = planner.solve();
+        let generation = planner.generation;
+        let _ = planner.update(Message::Progress(
+            generation,
+            Err("Search stopped".to_owned()),
+        ));
+
+        assert!(planner.job.is_none());
+        assert!(planner.solution.is_none());
+        assert!(planner.completed_elapsed.is_none());
+    }
+
+    #[test]
+    fn elapsed_labels_handle_minutes_and_hours() {
+        for (seconds, expected) in [
+            (0, "0:00"),
+            (59, "0:59"),
+            (60, "1:00"),
+            (3_599, "59:59"),
+            (3_600, "1:00:00"),
+            (3_661, "1:01:01"),
+        ] {
+            assert_eq!(elapsed_label(Duration::from_secs(seconds)), expected);
+        }
     }
 }

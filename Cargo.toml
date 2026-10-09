@@ -4,12 +4,6 @@ version = "0.1.0"
 edition = "2024"
 default-run = "tally-problem"
 
-[features]
-default = ["cli"]
-cli = ["dep:clap", "dep:comfy-table"]
-gui = ["dep:iced", "dep:webbrowser", "worker"]
-worker = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
-
 [[bin]]
 name = "tally-problem"
 path = "src/bin/cli.rs"
@@ -28,7 +22,22 @@ required-features = ["worker"]
 [dependencies]
 clap = { version = "4.6.7", features = ["derive", "wrap_help"], optional = true }
 comfy-table = { version = "8.0.0", default-features = false, optional = true }
-iced = { version = "0.14.0", default-features = false, features = ["advanced", "crisp", "fira-sans", "thread-pool", "wayland", "web-colors", "webgl", "wgpu", "x11"], optional = true }
+iced = {
+  version = "0.14.0",
+  default-features = false,
+  features = [
+    "advanced",
+    "crisp",
+    "fira-sans",
+    "thread-pool",
+    "wayland",
+    "web-colors",
+    "webgl",
+    "wgpu",
+    "x11",
+  ],
+  optional = true
+}
 rustc-hash = "2.1.3"
 thiserror = "2.0.21"
 webbrowser = { version = "1.2.4", optional = true }
@@ -36,4 +45,23 @@ webbrowser = { version = "1.2.4", optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3.106", optional = true }
 wasm-bindgen = { version = "0.2.129", optional = true }
-web-sys = { version = "0.3.106", features = ["DedicatedWorkerGlobalScope", "Document", "ErrorEvent", "MessageEvent", "Url", "Window", "Worker"], optional = true }
+web-sys = {
+  version = "0.3.106",
+  features = [
+    "DedicatedWorkerGlobalScope",
+    "Document",
+    "ErrorEvent",
+    "MessageEvent",
+    "Performance",
+    "Url",
+    "Window",
+    "Worker",
+  ],
+  optional = true
+}
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:comfy-table"]
+gui = ["dep:iced", "dep:webbrowser", "worker"]
+worker = ["dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]

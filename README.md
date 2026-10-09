@@ -75,6 +75,12 @@ Once it finds a solution, it reconstructs the steps and groups consecutive
 actions for display. There is no fixed digit limit, though difficult patterns
 can still take a long time.
 
+The interface shows elapsed time and the number of increments currently being
+checked. When measured search timings support a useful prediction, it also shows
+an estimated percentage and remaining time. Estimates can adjust as more work is
+discovered; uncertain cases show an activity bar instead. 100% means the search
+has finished.
+
 ## Use as a Library
 
 Find a sequence and apply it to a counter:

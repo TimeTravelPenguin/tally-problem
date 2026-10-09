@@ -24,4 +24,6 @@ pub mod counter;
 pub mod search;
 
 pub use counter::{TallyCounter, TallyCounterError};
-pub use search::{Action, SearchError, SearchProgress, SearchResult, SearchSession, search};
+pub use search::{
+    Action, SearchError, SearchProgress, SearchResult, SearchSession, SearchStatistics, search,
+};

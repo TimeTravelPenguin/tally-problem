@@ -18,6 +18,7 @@ pub(super) struct Diagram {
     differences: HashMap<(NodeId, NodeId), NodeId>,
     reset_preimages: HashMap<(NodeId, u8), NodeId>,
     increments: HashMap<NodeId, NodeId>,
+    work: u64,
 }
 
 #[derive(Debug)]
@@ -71,6 +72,8 @@ impl Diagram {
         right: NodeId,
         difference: bool,
     ) -> Result<NodeId, SearchError> {
+        self.record_work(1);
+
         if let Some(result) = self.combined(left, right, difference) {
             return Ok(result);
         }
@@ -79,6 +82,8 @@ impl Diagram {
         push(&mut pending, (left, right, false))?;
 
         while let Some((left, right, expanded)) = pending.pop() {
+            self.record_work(1);
+
             if self.combined(left, right, difference).is_some() {
                 continue;
             }
@@ -140,6 +145,8 @@ impl Diagram {
     /// Preimage of the decimal increment, including wraparound. The other nine
     /// branches do not carry and can reuse their entire existing subtrees.
     pub(super) fn increment_preimage(&mut self, root: NodeId) -> Result<NodeId, SearchError> {
+        self.record_work(1);
+
         if root <= TERMINAL {
             return Ok(root);
         }
@@ -148,6 +155,7 @@ impl Diagram {
         let mut node = root;
 
         while node > TERMINAL && !self.increments.contains_key(&node) {
+            self.record_work(1);
             push(&mut pending, node)?;
             node = self.children(node)[0];
         }
@@ -155,6 +163,7 @@ impl Diagram {
         let mut result = self.increments.get(&node).copied().unwrap_or(node);
 
         while let Some(node) = pending.pop() {
+            self.record_work(1);
             let previous = self.children(node);
             let mut children = [EMPTY; 10];
             children[..9].copy_from_slice(&previous[1..]);
@@ -173,6 +182,8 @@ impl Diagram {
         root: NodeId,
         reset: u8,
     ) -> Result<NodeId, SearchError> {
+        self.record_work(1);
+
         if root <= TERMINAL {
             return Ok(root);
         }
@@ -181,6 +192,8 @@ impl Diagram {
         push(&mut pending, (root, false))?;
 
         while let Some((node, expanded)) = pending.pop() {
+            self.record_work(1);
+
             if node <= TERMINAL || self.reset_preimages.contains_key(&(node, reset)) {
                 continue;
             }
@@ -226,10 +239,19 @@ impl Diagram {
     }
 
     pub(super) fn clear_caches(&mut self) {
+        self.record_work(self.cached_entries());
         self.unions.clear();
         self.differences.clear();
         self.reset_preimages.clear();
         self.increments.clear();
+    }
+
+    fn cached_entries(&self) -> usize {
+        self.unions
+            .len()
+            .saturating_add(self.differences.len())
+            .saturating_add(self.reset_preimages.len())
+            .saturating_add(self.increments.len())
     }
 
     /// Compact only between search groups. All retained frontier, settled and
@@ -238,6 +260,10 @@ impl Diagram {
         &mut self,
         roots: impl Iterator<Item = NodeId>,
     ) -> Result<Vec<NodeId>, SearchError> {
+        // Account for the reachability, live-node count and rebuilding scans.
+        // This cumulative counter survives both compaction and cache resets.
+        self.record_work(self.nodes.len().saturating_mul(3).saturating_add(2));
+        self.record_work(self.cached_entries());
         self.unions = HashMap::default();
         self.differences = HashMap::default();
         self.reset_preimages = HashMap::default();
@@ -250,6 +276,8 @@ impl Diagram {
         mapping[1] = TERMINAL;
 
         for root in roots {
+            self.record_work(1);
+
             if root > TERMINAL {
                 mapping[root as usize] = NodeId::MAX;
             }
@@ -302,11 +330,21 @@ impl Diagram {
         self.nodes.len()
     }
 
+    pub(super) fn work(&self) -> u64 {
+        self.work
+    }
+
+    fn record_work(&mut self, amount: usize) {
+        self.work = self.work.saturating_add(amount as u64);
+    }
+
     fn children(&self, node: NodeId) -> [NodeId; 10] {
         self.nodes[node as usize - 2].children
     }
 
     fn intern(&mut self, children: [NodeId; 10]) -> Result<NodeId, SearchError> {
+        self.record_work(1);
+
         if children == [EMPTY; 10] {
             return Ok(EMPTY);
         }
@@ -316,6 +354,7 @@ impl Diagram {
         let mut candidate = collision;
 
         while candidate > TERMINAL {
+            self.record_work(1);
             let node = &self.nodes[candidate as usize - 2];
 
             if node.children == children {
@@ -535,6 +574,7 @@ mod tests {
         let discarded: Vec<_> = (0..1_000).map(|member| member % 3 == 0).collect();
         let _ = word_set(&mut diagram, &discarded);
         let previous_count = diagram.node_count();
+        let previous_work = diagram.work();
         let mapping = diagram
             .collect([original, predecessor, union].into_iter())
             .unwrap();
@@ -543,6 +583,7 @@ mod tests {
         let union = mapping[union as usize];
 
         assert!(diagram.node_count() < previous_count);
+        assert!(diagram.work() > previous_work);
         assert!(diagram.contains(original, &[1, 2, 3]));
         assert!(diagram.contains(predecessor, &[1, 2, 2]));
         assert!(diagram.contains(union, &[1, 2, 2]));
@@ -550,5 +591,27 @@ mod tests {
         assert!(!diagram.contains(union, &[1, 2, 4]));
         assert_eq!(diagram.increment_preimage(original).unwrap(), predecessor);
         assert_eq!(diagram.union(original, predecessor).unwrap(), union);
+    }
+
+    #[test]
+    fn work_snapshots_survive_cache_clears_and_compaction() {
+        let mut diagram = Diagram::default();
+        let root = diagram.singleton(&[0, 0, 0]).unwrap();
+        let reset = diagram.reset_preimage(root, 9).unwrap();
+        let previous_work = diagram.work();
+        assert!(previous_work > 0);
+
+        diagram.clear_caches();
+        assert!(diagram.work() >= previous_work);
+        let before_collection = diagram.work();
+        let mapping = diagram.collect([root, reset].into_iter()).unwrap();
+        let root = mapping[root as usize];
+        let reset = mapping[reset as usize];
+        assert!(diagram.work() > before_collection);
+        let collected_work = diagram.work();
+
+        assert_eq!(diagram.reset_preimage(root, 9).unwrap(), reset);
+        assert!(diagram.work() > collected_work);
+        assert!(diagram.contains(reset, &[9, 0, 9]));
     }
 }

@@ -66,11 +66,33 @@ pub enum SearchProgress {
     Complete(SearchResult),
 }
 
+/// Observations of search work, without an estimated total or completion time.
+///
+/// Diagram work is a cumulative count of approximate node visits during set
+/// operations and compaction. It is useful for comparing successive samples,
+/// but does not represent concrete counter states or a fixed duration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchStatistics {
+    /// Nonempty state groups explored, matching `SearchProgress::visited_states`.
+    pub visited_groups: usize,
+    /// Increment cost of the latest queued group processed.
+    pub increment_layer: u64,
+    /// Reset cost within the latest increment layer; can decrease at a new layer.
+    pub reset_ticks: u64,
+    /// Diagram nodes at the latest sample; compaction can reduce this count.
+    pub diagram_nodes: usize,
+    /// Cumulative approximate diagram work, including compaction and cache clears.
+    pub diagram_work: u64,
+    /// Queued state groups at the latest sample, whose processing may create more.
+    pub queued_groups: usize,
+}
+
 /// An exact incremental solver. Search state is owned independently of the
 /// original counter and released on completion or failure.
 #[derive(Debug)]
 pub struct SearchSession {
     state: SessionState,
+    statistics: SearchStatistics,
 }
 
 #[derive(Debug)]
@@ -168,6 +190,7 @@ impl SearchSession {
         if counter.values() == target {
             return Ok(Self {
                 state: SessionState::Complete(SearchResult::Found(Vec::new())),
+                statistics: SearchStatistics::default(),
             });
         }
 
@@ -185,6 +208,7 @@ impl SearchSession {
         if incremented.values() == target && creates_boundary {
             return Ok(Self {
                 state: SessionState::Complete(SearchResult::Found(vec![Action::Increment(1)])),
+                statistics: SearchStatistics::default(),
             });
         }
 
@@ -208,8 +232,17 @@ impl SearchSession {
         }
 
         Ok(Self {
+            statistics: search.statistics(),
             state: SessionState::Searching(Box::new(search)),
         })
+    }
+
+    /// Read the latest work snapshot without advancing the search.
+    ///
+    /// After completion or failure, retains the final snapshot from immediately
+    /// before search buffers were released. No diagram storage is retained.
+    pub fn statistics(&self) -> SearchStatistics {
+        self.statistics
     }
 
     /// Process at most `max_states` queued state groups, including empty groups.
@@ -220,7 +253,13 @@ impl SearchSession {
     /// Completion releases search buffers and subsequent calls retain the result.
     pub fn advance(&mut self, max_states: usize) -> Result<SearchProgress, SearchError> {
         let progress = match &mut self.state {
-            SessionState::Searching(search) => search.advance(max_states),
+            SessionState::Searching(search) => {
+                let progress = search.advance(max_states);
+                self.statistics = search.statistics();
+
+                progress
+            }
+
             SessionState::Complete(result) => return Ok(SearchProgress::Complete(result.clone())),
             SessionState::Failed(error) => return Err(error.clone()),
         };
@@ -238,6 +277,19 @@ impl SearchSession {
 }
 
 impl ActiveSearch {
+    fn statistics(&self) -> SearchStatistics {
+        let cost = self.cache_cost.unwrap_or(Cost::ZERO);
+
+        SearchStatistics {
+            visited_groups: self.visited_states,
+            increment_layer: cost.increments,
+            reset_ticks: cost.reset_ticks,
+            diagram_nodes: self.diagram.node_count(),
+            diagram_work: self.diagram.work(),
+            queued_groups: self.queue.len(),
+        }
+    }
+
     fn advance(&mut self, max_states: usize) -> Result<SearchProgress, SearchError> {
         for _ in 0..max_states {
             let Some(Reverse((cost, reset))) = self.queue.pop() else {
@@ -550,6 +602,55 @@ mod tests {
             session.advance(0),
             Ok(SearchProgress::Complete(SearchResult::Found(Vec::new())))
         );
+        assert_eq!(session.statistics(), SearchStatistics::default());
+    }
+
+    #[test]
+    fn statistics_preserve_search_order_and_final_snapshot() {
+        let counter = TallyCounter::new(3).unwrap();
+        let target = [9, 8, 7];
+        let mut session = SearchSession::new(&counter, &target).unwrap();
+        let initial = session.statistics();
+        assert_eq!(initial.visited_groups, 0);
+        assert!(initial.queued_groups > 0);
+        assert!(initial.diagram_nodes > 0);
+        assert!(initial.diagram_work > 0);
+
+        session.advance(0).unwrap();
+        assert_eq!(session.statistics(), initial);
+        let mut previous = initial;
+
+        let actions = loop {
+            let progress = session.advance(7).unwrap();
+            let statistics = session.statistics();
+            assert!(statistics.visited_groups >= previous.visited_groups);
+            assert!(statistics.diagram_work >= previous.diagram_work);
+            assert!(
+                (statistics.increment_layer, statistics.reset_ticks)
+                    >= (previous.increment_layer, previous.reset_ticks)
+            );
+
+            previous = statistics;
+
+            match progress {
+                SearchProgress::InProgress { visited_states } => {
+                    assert_eq!(statistics.visited_groups, visited_states);
+                }
+
+                SearchProgress::Complete(SearchResult::Found(actions)) => break actions,
+                SearchProgress::Complete(SearchResult::NotFound) => panic!("Target is reachable"),
+            }
+        };
+
+        let final_statistics = session.statistics();
+        let (increments, reset_ticks) = action_cost(&actions);
+        assert_eq!(final_statistics.increment_layer, increments as u64);
+        assert_eq!(final_statistics.reset_ticks, reset_ticks as u64);
+        assert!(final_statistics.diagram_work > initial.diagram_work);
+        assert!(matches!(session.state, SessionState::Complete(_)));
+
+        session.advance(usize::MAX).unwrap();
+        assert_eq!(session.statistics(), final_statistics);
     }
 
     #[test]
@@ -598,6 +699,7 @@ mod tests {
         let initial = TallyCounter::new(4).unwrap();
         let target = [9, 8, 7, 6];
         let mut session = SearchSession::new(&initial, &target).unwrap();
+        let mut previous_work = session.statistics().diagram_work;
         let actions = loop {
             // Force frequent collection while an unfinished frontier and all
             // reconstruction regions are still retained.
@@ -605,9 +707,12 @@ mod tests {
                 search.collection_threshold = 0;
             }
 
-            if let SearchProgress::Complete(SearchResult::Found(actions)) =
-                session.advance(64).unwrap()
-            {
+            let progress = session.advance(64).unwrap();
+            let work = session.statistics().diagram_work;
+            assert!(work > previous_work);
+            previous_work = work;
+
+            if let SearchProgress::Complete(SearchResult::Found(actions)) = progress {
                 break actions;
             }
         };

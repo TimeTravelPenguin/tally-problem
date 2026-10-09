@@ -4,6 +4,8 @@ mod app;
 mod focus;
 #[path = "../gui/model.rs"]
 mod model;
+#[path = "../gui/progress.rs"]
+mod progress;
 #[path = "../gui/solver.rs"]
 mod solver;
 
