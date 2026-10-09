@@ -15,6 +15,8 @@ use crate::playback::Playback;
 use crate::playback_view;
 use crate::progress::{ProgressEstimate, TimingPrediction};
 use crate::solver;
+#[cfg(target_arch = "wasm32")]
+use crate::web_input;
 
 const PAGE: &str = "planner-page";
 const VIDEO_URL: &str = "https://www.youtube.com/watch?v=AT9wAQSV5_4";
@@ -156,6 +158,8 @@ pub enum Message {
     PointerPressed,
     InputFocused(u64, &'static str, bool),
     RevealFocus(u64, Option<f32>),
+    #[cfg(target_arch = "wasm32")]
+    WebInput(web_input::Event),
 }
 
 impl Planner {
@@ -181,7 +185,7 @@ impl Planner {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        event::listen_with(|event, status, _window| match event {
+        let canvas = event::listen_with(|event, status, _window| match event {
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 modifiers,
@@ -200,11 +204,72 @@ impl Planner {
             }
 
             _ => None,
-        })
+        });
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            Subscription::batch([canvas, web_input::subscription().map(Message::WebInput)])
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        canvas
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            #[cfg(target_arch = "wasm32")]
+            Message::WebInput(event) => {
+                if !event.is_current() {
+                    return Task::none();
+                }
+
+                return match event.kind {
+                    web_input::Kind::Changed(id, value) => {
+                        let message = match id {
+                            "target-input" if value != self.form.target => {
+                                Message::TargetChanged(value)
+                            }
+
+                            "start-input" if value != self.form.start => {
+                                Message::StartChanged(value)
+                            }
+
+                            "reset-input" if value != self.form.reset_index => {
+                                Message::ResetIndexChanged(value)
+                            }
+
+                            _ => return Task::none(),
+                        };
+
+                        self.update(message)
+                    }
+
+                    web_input::Kind::Focused(id) => {
+                        let field = [Focus::Target, Focus::Start, Focus::ResetIndex]
+                            .into_iter()
+                            .find(|field| field.id() == id);
+
+                        field.map_or_else(Task::none, |field| self.focus_widgets(field))
+                    }
+
+                    web_input::Kind::KeyPressed(id, key, modifiers) => {
+                        self.focus = [Focus::Target, Focus::Start, Focus::ResetIndex]
+                            .into_iter()
+                            .find(|field| field.id() == id);
+
+                        if key == Key::Named(Named::Tab) {
+                            // The browser has already moved its native input focus
+                            // within the key event so the mobile keyboard stays open.
+                            return self.focus_widgets(self.next_focus(modifiers.shift()));
+                        }
+
+                        self.key_pressed(key, modifiers)
+                    }
+
+                    web_input::Kind::Submit => self.update(Message::SolvePressed),
+                };
+            }
+
             Message::TargetChanged(value) => {
                 self.form.target = value;
                 self.changed(Focus::Target);
@@ -240,6 +305,9 @@ impl Planner {
                 if !was_searching {
                     self.form = Form::default();
                 }
+
+                #[cfg(target_arch = "wasm32")]
+                web_input::reset([&self.form.target, &self.form.start, &self.form.reset_index]);
 
                 return self.focus(Focus::Target);
             }
@@ -377,6 +445,15 @@ impl Planner {
             }
 
             Message::PointerPressed => {
+                #[cfg(target_arch = "wasm32")]
+                if let Some(id) = web_input::active_field()
+                    && let Some(field) = [Focus::Target, Focus::Start, Focus::ResetIndex]
+                        .into_iter()
+                        .find(|field| field.id() == id)
+                {
+                    return self.focus_widgets(field);
+                }
+
                 self.focus = None;
                 self.focus_revision += 1;
                 let revision = self.focus_revision;
@@ -476,6 +553,13 @@ impl Planner {
     }
 
     fn focus(&mut self, focus: Focus) -> Task<Message> {
+        #[cfg(target_arch = "wasm32")]
+        web_input::focus(focus.id());
+
+        self.focus_widgets(focus)
+    }
+
+    fn focus_widgets(&mut self, focus: Focus) -> Task<Message> {
         self.focus = Some(focus);
         self.focus_revision += 1;
         let revision = self.focus_revision;
@@ -523,6 +607,21 @@ impl Planner {
         controls
     }
 
+    fn next_focus(&self, backwards: bool) -> Focus {
+        let order = self.focus_order();
+        let index = self
+            .focus
+            .and_then(|focus| order.iter().position(|&item| item == focus));
+        let next = match (index, backwards) {
+            (Some(index), true) => (index + order.len() - 1) % order.len(),
+            (Some(index), false) => (index + 1) % order.len(),
+            (None, true) => order.len() - 1,
+            (None, false) => 0,
+        };
+
+        order[next]
+    }
+
     fn key_pressed(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Message> {
         if self.focus == Some(Focus::PlaybackSpeed)
             && let Some(playback) = &self.playback
@@ -542,18 +641,7 @@ impl Planner {
 
         match key.as_ref() {
             Key::Named(Named::Tab) => {
-                let order = self.focus_order();
-                let index = self
-                    .focus
-                    .and_then(|focus| order.iter().position(|&item| item == focus));
-                let next = match (index, modifiers.shift()) {
-                    (Some(index), true) => (index + order.len() - 1) % order.len(),
-                    (Some(index), false) => (index + 1) % order.len(),
-                    (None, true) => order.len() - 1,
-                    (None, false) => 0,
-                };
-
-                return self.focus(order[next]);
+                return self.focus(self.next_focus(modifiers.shift()));
             }
 
             Key::Named(Named::Enter | Named::Space) => {
@@ -675,7 +763,12 @@ impl Planner {
                 .center_x(Fill)
                 .padding(if compact { [28, 16] } else { [52, 32] });
 
-            scrollable(page).id(PAGE).width(Fill).height(Fill).into()
+            let page: Element<'_, Message> = scrollable(page).id(PAGE).width(Fill).height(Fill).into();
+
+            #[cfg(target_arch = "wasm32")]
+            let page = web_input::layer(page);
+
+            page
         }).into()
     }
 
@@ -1193,6 +1286,18 @@ fn field<'a>(
 
             style
         });
+
+    #[cfg(target_arch = "wasm32")]
+    let input = web_input::field(
+        input.into(),
+        focus.id(),
+        label,
+        placeholder,
+        value,
+        invalid,
+        focus.help().unwrap_or_default(),
+        error,
+    );
 
     let help = focus.help().unwrap_or_default();
     let help_icon = container(text("?").size(14).style(text::secondary))
