@@ -78,11 +78,11 @@ An increment adds one to the display, carries from the right, and wraps at its
 width. It preserves the reset index:
 
 $$
-\operatorname{Inc}(x,q)=
-\left(\operatorname{digits}_n((V(x)+1)\bmod M),q\right).
+\mathrm{Inc}(x,q)=
+\left(\mathrm{digits}_n((V(x)+1)\bmod M),q\right).
 $$
 
-Here $\operatorname{digits}_n$ includes leading zeros. Thus the display after
+Here $\mathrm{digits}_n$ includes leading zeros. Thus the display after
 incrementing $\mathtt{9999}$ is $\mathtt{0000}$.
 
 For a forward reset tick, define the digit map
@@ -104,23 +104,23 @@ $$
 The complete forward transition is
 
 $$
-\operatorname{Forward}(x,q)=\bigl(F_q(x),(q+1)\bmod 10\bigr).
+\mathrm{Forward}(x,q)=\bigl(F_q(x),(q+1)\bmod 10\bigr).
 $$
 
 Wheels equal to the **old** reset index move to its successor. Other wheels stay
 where they are. A backward tick moves only the knob:
 
 $$
-\operatorname{Backward}(x,q)=\bigl(x,(q-1)\bmod 10\bigr).
+\mathrm{Backward}(x,q)=\bigl(x,(q-1)\bmod 10\bigr).
 $$
 
 For example,
 
 $$
 (\mathtt{0077},0)
-\xrightarrow{\operatorname{Forward}}
+\xrightarrow{\mathrm{Forward}}
 (\mathtt{1177},1)
-\xrightarrow{\operatorname{Backward}}
+\xrightarrow{\mathrm{Backward}}
 (\mathtt{1177},0).
 $$
 
@@ -129,21 +129,21 @@ $$
 Grouped increments have the same fixed-width meaning as repeated button presses:
 
 $$
-\operatorname{Inc}^k(x,q)=
-\left(\operatorname{digits}_n((V(x)+k)\bmod M),q\right).
+\mathrm{Inc}^k(x,q)=
+\left(\mathrm{digits}_n((V(x)+k)\bmod M),q\right).
 $$
 
 Backward turns can be reduced modulo ten without affecting the display:
 
 $$
-\operatorname{Backward}^k(x,q)=\bigl(x,(q-k)\bmod10\bigr).
+\mathrm{Backward}^k(x,q)=\bigl(x,(q-k)\bmod10\bigr).
 $$
 
 For grouped forward turns, let $q'=(q+k)\bmod10$. Before a full revolution,
 $0\le k<10$, a wheel moves exactly when its old value lies in the swept arc:
 
 $$
-\operatorname{Forward}^k(x,q)=(y,q'),\qquad
+\mathrm{Forward}^k(x,q)=(y,q'),\qquad
 y_j=
 \begin{cases}
 q',&(x_j-q)\bmod10<k,\\
@@ -155,7 +155,7 @@ After a full revolution, all wheels have been gathered and move with the knob,
 so for $k\ge10$,
 
 $$
-\operatorname{Forward}^k(x,q)=\bigl((q')^n,q'\bigr).
+\mathrm{Forward}^k(x,q)=\bigl((q')^n,q'\bigr).
 $$
 
 These formulas let `TallyCounter` apply counted operations without iterating
@@ -163,7 +163,7 @@ every tick. They also show why the knob index alone is insufficient for
 normalizing arbitrary forward/backward sequences. In particular,
 
 $$
-\operatorname{Forward}^{10}(x,q)=(q^n,q)
+\mathrm{Forward}^{10}(x,q)=(q^n,q)
 $$
 
 can change the display even though the index returns to its original value.
@@ -389,8 +389,8 @@ boundaries after a reset is a subset of the previous set. Every matching
 available afterwards was available before with the same weights, proving
 
 $$
-B(\operatorname{Forward}(x,q)_{\mathrm{display}})\le B(x),
-\qquad B(\operatorname{Backward}(x,q)_{\mathrm{display}})=B(x).
+B(\mathrm{Forward}(x,q)_{\mathrm{display}})\le B(x),
+\qquad B(\mathrm{Backward}(x,q)_{\mathrm{display}})=B(x).
 $$
 
 ### Proof that one increment increases the score by at most one
@@ -427,7 +427,7 @@ minus one. If $j$ is the first position, there is no preceding boundary to add.
 Together these cases prove
 
 $$
-B(\operatorname{Inc}(x,q)_{\mathrm{display}})\le B(x)+1.
+B(\mathrm{Inc}(x,q)_{\mathrm{display}})\le B(x)+1.
 $$
 
 ### The bound and its consistency
@@ -483,7 +483,7 @@ Say that a display is complete when every decimal digit occurs at least once,
 including leading zeros. Define
 
 $$
-\operatorname{Complete}(x)
+\mathrm{Complete}(x)
 \iff\{x_0,\ldots,x_{n-1}\}=\mathcal D.
 $$
 
@@ -491,8 +491,8 @@ Suppose the target is complete. Set
 
 $$
 U=\max\left\{v\in\{0,\ldots,T\}:
-\neg\operatorname{Complete}(\operatorname{digits}_n(v))\right\},
-\qquad u=\operatorname{digits}_n(U),
+\neg\mathrm{Complete}(\mathrm{digits}_n(v))\right\},
+\qquad u=\mathrm{digits}_n(U),
 \qquad H=T-U.
 $$
 
@@ -629,9 +629,9 @@ tick reaches $u$ and the forced suffix completes the puzzle:
 
 $$
 (\mathtt{912345678888},9)
-\xrightarrow{\operatorname{Forward}}
+\xrightarrow{\mathrm{Forward}}
 (\mathtt{012345678888},0)
-\xrightarrow{\operatorname{Inc}^{111}}
+\xrightarrow{\mathrm{Inc}^{111}}
 (\mathtt{012345678999},0).
 $$
 
@@ -781,7 +781,7 @@ digit merge $F_d$ to be chosen. Add edges
 $$
 x\xrightarrow{0}F_d(x)\quad(d\in\mathcal D),
 \qquad
-x\xrightarrow{1}\operatorname{Inc}(x)_{\mathrm{display}}.
+x\xrightarrow{1}\mathrm{Inc}(x)_{\mathrm{display}}.
 $$
 
 Starting at $0^n$, a complete zero–one breadth-first search puts zero-cost
@@ -1397,7 +1397,7 @@ Finally, the displayed percentage is based on predicted time, not simply the pro
 
 $$
 p =
-\operatorname{clamp}
+\mathrm{clamp}
 \left(
 100\,\frac{t}{t+\tau},
 \;0,\;99
