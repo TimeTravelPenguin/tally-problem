@@ -6,6 +6,12 @@
 >
 > While experimenting, I was continuously bouncing ideas off AI and having it look into
 > verifying claims while I worked. The results of this document are what followed.
+>
+> Additionally, I have another [document](./tally-counter-algebra.pdf) that explores a
+> different idea that I had, which was largely a hunch. It has its own document as I am
+> still processing the idea myself. I am interested in finding a _guaranteed_ solution,
+> regardless of whether or not that it is the optimal path. Think of it like how
+> Gaussian Elimination involves matrix products of permutation matrices.
 
 This document defines the puzzle implemented by Tally Puzzle Optimizer, proves
 the bounds used by the application, and explains its exact solver and progress
@@ -470,11 +476,11 @@ settling rules of the grouped solver described later.
 
 Examples from zero displays:
 
-| Target          | Guaranteed minimum $`h_B`$ | Exact minimum increments |
-| --------------- | -----------------------: | -----------------------: |
-| $`\mathtt{1000}`$ |                      $`3`$ |                      $`3`$ |
-| $`\mathtt{0101}`$ |                      $`4`$ |                      $`4`$ |
-| $`\mathtt{9876}`$ |                      $`4`$ |                      $`6`$ |
+| Target            | Guaranteed minimum $`h_B`$ | Exact minimum increments |
+| ----------------- | -------------------------: | -----------------------: |
+| $`\mathtt{1000}`$ |                      $`3`$ |                    $`3`$ |
+| $`\mathtt{0101}`$ |                      $`4`$ |                    $`4`$ |
+| $`\mathtt{9876}`$ |                      $`4`$ |                    $`6`$ |
 
 The final row illustrates the difference between a proved underestimate and an
 exact answer.
@@ -767,7 +773,7 @@ Exhaustive enumeration of the increment-cost graph gives the following exact
 small cases:
 
 | Width $`n`$ | Worst minimum increment count $`W(n)`$ |
-| --------: | -----------------------------------: |
+| ----------: | -------------------------------------: |
 |       $`1`$ |                                  $`0`$ |
 |       $`2`$ |                                  $`1`$ |
 |       $`3`$ |                                  $`3`$ |
@@ -799,13 +805,13 @@ For the four-wheel enumeration, the distribution is:
 
 | Minimum increments | Number of targets |
 | -----------------: | ----------------: |
-|                $`0`$ |              $`10`$ |
-|                $`1`$ |              $`90`$ |
-|                $`2`$ |             $`540`$ |
-|                $`3`$ |             $`900`$ |
-|                $`4`$ |            $`2460`$ |
-|                $`5`$ |            $`4320`$ |
-|                $`6`$ |            $`1680`$ |
+|              $`0`$ |            $`10`$ |
+|              $`1`$ |            $`90`$ |
+|              $`2`$ |           $`540`$ |
+|              $`3`$ |           $`900`$ |
+|              $`4`$ |          $`2460`$ |
+|              $`5`$ |          $`4320`$ |
+|              $`6`$ |          $`1680`$ |
 
 The counts sum to $`10^4`$, and none needs more than six increments. Together with
 the zero-start reduction, this establishes the six-increment guarantee from any
@@ -874,11 +880,11 @@ Otherwise, the solver constructs a singleton diagram for $`t_\ast`$, shares that
 
 The frontier is grouped by the key $`(c,q)`$, not by individual displays. Three families of display sets play different roles:
 
-| Mathematical set | Implementation           | Meaning                                                                                                                           |
-| ---------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| $`P_{c,q}`$        | `pending[(cost, reset)]` | Candidate displays with a known path of cost $`c`$ to the effective goal. Their shortest cost has not necessarily been established. |
-| $`S_q`$            | `settled[reset]`         | Displays already accepted at their smallest remaining cost for reset index $`q`$.                                                   |
-| $`R_{c,q}`$        | `regions[(cost, reset)]` | Newly accepted displays whose exact optimal remaining cost is $`c`$; retained for reconstruction.                                   |
+| Mathematical set | Implementation           | Meaning                                                                                                                             |
+| ---------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| $`P_{c,q}`$      | `pending[(cost, reset)]` | Candidate displays with a known path of cost $`c`$ to the effective goal. Their shortest cost has not necessarily been established. |
+| $`S_q`$          | `settled[reset]`         | Displays already accepted at their smallest remaining cost for reset index $`q`$.                                                   |
+| $`R_{c,q}`$      | `regions[(cost, reset)]` | Newly accepted displays whose exact optimal remaining cost is $`c`$; retained for reconstruction.                                   |
 
 All these sets are diagram roots. The binary heap contains group keys, ordered by $`c`$ and then by the numeric reset index. The reset-index tie break does not introduce another optimization objective.
 
