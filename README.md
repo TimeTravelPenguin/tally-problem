@@ -106,6 +106,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Building
 
+Build commands use `release` for native apps and `web-release` for the browser UI
+and its solver worker. Both optimize for solver speed. The `dev` profile keeps
+debug information and runtime checks with lighter optimization.
+
+For development builds, choose the profile explicitly:
+
+```sh
+just build-cli dev
+just build-desktop dev
+just build-web / dev
+```
+
 ### CLI
 
 Run the solver with a target value:

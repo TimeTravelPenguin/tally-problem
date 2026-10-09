@@ -65,3 +65,21 @@ default = ["cli"]
 cli = ["dep:clap", "dep:comfy-table"]
 gui = ["dep:iced", "dep:webbrowser", "worker"]
 worker = ["dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
+
+# Keep development checks and debug information while improving solver speed.
+[profile.dev]
+opt-level = 1
+
+# Optimize native releases while retaining function names in panic backtraces.
+[profile.release]
+opt-level = 3
+strip = "debuginfo"
+lto = "thin"
+codegen-units = 1
+
+# Keep full speed optimization for both the browser UI and solver worker.
+[profile.web-release]
+inherits = "release"
+# wasm-opt needs feature metadata that strip = "symbols" would remove.
+strip = "debuginfo"
+panic = "abort"

@@ -42,7 +42,7 @@ jobs:
       - name: Build browser app
         env:
           PUBLIC_URL: ${{ steps.pages.outputs.base_url }}/
-        run: trunk build --release --public-url "$PUBLIC_URL"
+        run: trunk build --release --cargo-profile web-release --public-url "$PUBLIC_URL"
 
       - name: Upload website
         uses: actions/upload-pages-artifact@v4
