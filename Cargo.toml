@@ -3,5 +3,11 @@ name = "tally-problem"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "tally-problem"
+path = "src/bin/cli.rs"
+
 [dependencies]
 clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
+comfy-table = { version = "8.0.0", default-features = false }
+thiserror = "2.0.21"
