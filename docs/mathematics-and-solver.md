@@ -1,4 +1,4 @@
-# The tally puzzle: mathematics, bounds, search, and progress
+# The Tally Puzzle: Mathematics, Bounds, Search, and Progress
 
 This document defines the puzzle implemented by Tally Puzzle Optimizer, proves
 the bounds used by the application, and explains its exact solver and progress
@@ -459,11 +459,11 @@ settling rules of the grouped solver described later.
 
 Examples from zero displays:
 
-| Target | Guaranteed minimum $h_B$ | Exact minimum increments |
-|---|---:|---:|
-| $\mathtt{1000}$ | $3$ | $3$ |
-| $\mathtt{0101}$ | $4$ | $4$ |
-| $\mathtt{9876}$ | $4$ | $6$ |
+| Target          | Guaranteed minimum $h_B$ | Exact minimum increments |
+| --------------- | -----------------------: | -----------------------: |
+| $\mathtt{1000}$ |                      $3$ |                      $3$ |
+| $\mathtt{0101}$ |                      $4$ |                      $4$ |
+| $\mathtt{9876}$ |                      $4$ |                      $6$ |
 
 The final row illustrates the difference between a proved underestimate and an
 exact answer.
@@ -756,15 +756,15 @@ Exhaustive enumeration of the increment-cost graph gives the following exact
 small cases:
 
 | Width $n$ | Worst minimum increment count $W(n)$ |
-|---:|---:|
-| $1$ | $0$ |
-| $2$ | $1$ |
-| $3$ | $3$ |
-| $4$ | $6$ |
-| $5$ | $11$ |
-| $6$ | $17$ |
-| $7$ | $25$ |
-| $8$ | $34$ |
+| --------: | -----------------------------------: |
+|       $1$ |                                  $0$ |
+|       $2$ |                                  $1$ |
+|       $3$ |                                  $3$ |
+|       $4$ |                                  $6$ |
+|       $5$ |                                 $11$ |
+|       $6$ |                                 $17$ |
+|       $7$ |                                 $25$ |
+|       $8$ |                                 $34$ |
 
 These are finite enumeration results, not an extrapolated formula. The
 verification graph has one vertex per display. Knob position can be omitted for
@@ -787,14 +787,14 @@ legal display-changing reset is one of those merges.
 For the four-wheel enumeration, the distribution is:
 
 | Minimum increments | Number of targets |
-|---:|---:|
-| $0$ | $10$ |
-| $1$ | $90$ |
-| $2$ | $540$ |
-| $3$ | $900$ |
-| $4$ | $2460$ |
-| $5$ | $4320$ |
-| $6$ | $1680$ |
+| -----------------: | ----------------: |
+|                $0$ |              $10$ |
+|                $1$ |              $90$ |
+|                $2$ |             $540$ |
+|                $3$ |             $900$ |
+|                $4$ |            $2460$ |
+|                $5$ |            $4320$ |
+|                $6$ |            $1680$ |
 
 The counts sum to $10^4$, and none needs more than six increments. Together with
 the zero-start reduction, this establishes the six-increment guarantee from any
@@ -863,11 +863,11 @@ Otherwise, the solver constructs a singleton diagram for $t_\ast$, shares that r
 
 The frontier is grouped by the key $(c,q)$, not by individual displays. Three families of display sets play different roles:
 
-| Mathematical set | Implementation | Meaning |
-| --- | --- | --- |
-| $P_{c,q}$ | `pending[(cost, reset)]` | Candidate displays with a known path of cost $c$ to the effective goal. Their shortest cost has not necessarily been established. |
-| $S_q$ | `settled[reset]` | Displays already accepted at their smallest remaining cost for reset index $q$. |
-| $R_{c,q}$ | `regions[(cost, reset)]` | Newly accepted displays whose exact optimal remaining cost is $c$; retained for reconstruction. |
+| Mathematical set | Implementation           | Meaning                                                                                                                           |
+| ---------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| $P_{c,q}$        | `pending[(cost, reset)]` | Candidate displays with a known path of cost $c$ to the effective goal. Their shortest cost has not necessarily been established. |
+| $S_q$            | `settled[reset]`         | Displays already accepted at their smallest remaining cost for reset index $q$.                                                   |
+| $R_{c,q}$        | `regions[(cost, reset)]` | Newly accepted displays whose exact optimal remaining cost is $c$; retained for reconstruction.                                   |
 
 All these sets are diagram roots. The binary heap contains group keys, ordered by $c$ and then by the numeric reset index. The reset-index tie break does not introduce another optimization objective.
 
@@ -1148,14 +1148,14 @@ The diagram-work counter records operation entry and traversal, interning and co
 
 The other telemetry fields have different meanings:
 
-| Observation | Meaning |
-| --- | --- |
-| Visited groups | Cumulative count of nonempty groups actually explored. |
-| Increment layer | Increment component of the latest processed cost, including any compressed forced increment tail. |
-| Reset ticks | Reset component of that latest cost; it can decrease when the search moves to another increment layer. |
-| Diagram nodes | Currently allocated nonterminal arena nodes, including nodes awaiting collection; compaction can reduce this count. |
-| Diagram work | Cumulative approximate work, independent of the current arena size. |
-| Queued groups | Current queue size; processing these entries may create additional groups. |
+| Observation     | Meaning                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Visited groups  | Cumulative count of nonempty groups actually explored.                                                              |
+| Increment layer | Increment component of the latest processed cost, including any compressed forced increment tail.                   |
+| Reset ticks     | Reset component of that latest cost; it can decrease when the search moves to another increment layer.              |
+| Diagram nodes   | Currently allocated nonterminal arena nodes, including nodes awaiting collection; compaction can reduce this count. |
+| Diagram work    | Cumulative approximate work, independent of the current arena size.                                                 |
+| Queued groups   | Current queue size; processing these entries may create additional groups.                                          |
 
 In particular, neither the node count nor the queue size is monotonic, and the current queue is not the entire remaining search.
 
@@ -1443,15 +1443,15 @@ The fallback is therefore part of the intended behavior. Unsupported widths and 
 
 ### What the mathematical framework currently changes
 
-| Mathematical fact | Current use | Guarantee or limitation |
-|---|---|---|
-| Resets cannot split equal wheels. | Proves a direct one-increment shortcut when it creates a new unequal boundary. | Exact solution with no resets, including a merged forced tail when applicable. |
-| Weighted boundary potential. | `increment_lower_bound` and the GUI's minimum-increment label. | Guaranteed underestimate; not currently a frontier priority or timing total. |
-| A forward reset omits its old index. | Removes the maximal mandatory final increment interval before search. | Exact reduction of both cost components; avoids traversing that interval. |
-| Resets act digitwise and can have many inverse states. | Decision-diagram reset preimages and subtree sharing. | Exact set operations can represent exponentially many predecessors compactly; arbitrary sets need not remain compact. |
-| Lexicographic costs are additive and ordered. | Reverse Dijkstra, exact cost regions, and constant tail offset. | Increment optimality first, reset optimality second. |
-| Uniform displays are reachable without increments. | General reachability and increment upper-bound proof. | A useful possible incumbent for future search pruning; not currently used as the returned construction or progress total. |
-| Measured work patterns and throughput. | Conditional percentage and ETA. | Empirical prediction with explicit fallback; not a proof about remaining computation. |
+| Mathematical fact                                      | Current use                                                                    | Guarantee or limitation                                                                                                   |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| Resets cannot split equal wheels.                      | Proves a direct one-increment shortcut when it creates a new unequal boundary. | Exact solution with no resets, including a merged forced tail when applicable.                                            |
+| Weighted boundary potential.                           | `increment_lower_bound` and the GUI's minimum-increment label.                 | Guaranteed underestimate; not currently a frontier priority or timing total.                                              |
+| A forward reset omits its old index.                   | Removes the maximal mandatory final increment interval before search.          | Exact reduction of both cost components; avoids traversing that interval.                                                 |
+| Resets act digitwise and can have many inverse states. | Decision-diagram reset preimages and subtree sharing.                          | Exact set operations can represent exponentially many predecessors compactly; arbitrary sets need not remain compact.     |
+| Lexicographic costs are additive and ordered.          | Reverse Dijkstra, exact cost regions, and constant tail offset.                | Increment optimality first, reset optimality second.                                                                      |
+| Uniform displays are reachable without increments.     | General reachability and increment upper-bound proof.                          | A useful possible incumbent for future search pruning; not currently used as the returned construction or progress total. |
+| Measured work patterns and throughput.                 | Conditional percentage and ETA.                                                | Empirical prediction with explicit fallback; not a proof about remaining computation.                                     |
 
 An increment bound can certify that a returned solution is increment-optimal
 when its increment count meets the bound. It still says nothing by itself about
@@ -1504,23 +1504,23 @@ cargo test --all-features --locked
 
 ### Finding the implementation
 
-| Source | Responsibility |
-|---|---|
-| [Library API](../src/lib.rs) | Public counter, action, result, session, statistics, and lower-bound exports. |
-| [Counter model](../src/counter.rs) | Validated digit vectors, decimal carry, wraparound, and grouped reset operations. |
-| [Mathematical bounds](../src/search/bounds.rs) | Weighted matching recurrence, greatest missing-digit predecessor, and checked decimal differences. |
-| [Search and reconstruction](../src/search.rs) | Input validation, direct shortcuts, forced-tail reduction, cost ordering, grouped frontier, exact regions, reconstruction, and lifecycle. |
-| [Decision diagram](../src/search/diagram.rs) | Canonical nodes, set operations, inverse transitions, cache management, compaction, and approximate work accounting. |
-| [Progress model](../src/gui/progress.rs) | Mathematical bound label data, empirical work prior, sample rates, prediction gates, and ETA. |
-| [GUI application](../src/gui/app.rs) | Job generations, report freshness, visible elapsed time, progress views, and completed result handling. |
-| [GUI model](../src/gui/model.rs) | Form validation, preparation, and grouped-action replay into result rows. |
-| [Solver facade](../src/gui/solver.rs) | Shared cancellable background-task interface and paired update snapshots. |
-| [Native backend](../src/gui/solver_native.rs) | Dedicated thread, bounded batches, cancellation checks, and worker-local time. |
-| [Browser backend](../src/gui/solver_wasm.rs) | Worker creation and termination, startup handshake, message decoding, and exact integer transport. |
-| [Worker implementation](../src/gui/worker.rs) | Browser-side search execution, elapsed clock, and encoded progress/results. |
-| [Worker bootstrap](../solver-worker.js) | Load the worker WASM module and start its handler. |
-| [Playback state](../src/gui/playback.rs) and [rendering](../src/gui/playback_view.rs) | Apply real ticks, animate their exact states, and keep wide displays readable. |
-| [CLI](../src/bin/cli.rs) | Parse inputs, run the synchronous solver, and print grouped replay states in a table. |
+| Source                                                                                | Responsibility                                                                                                                            |
+| ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| [Library API](../src/lib.rs)                                                          | Public counter, action, result, session, statistics, and lower-bound exports.                                                             |
+| [Counter model](../src/counter.rs)                                                    | Validated digit vectors, decimal carry, wraparound, and grouped reset operations.                                                         |
+| [Mathematical bounds](../src/search/bounds.rs)                                        | Weighted matching recurrence, greatest missing-digit predecessor, and checked decimal differences.                                        |
+| [Search and reconstruction](../src/search.rs)                                         | Input validation, direct shortcuts, forced-tail reduction, cost ordering, grouped frontier, exact regions, reconstruction, and lifecycle. |
+| [Decision diagram](../src/search/diagram.rs)                                          | Canonical nodes, set operations, inverse transitions, cache management, compaction, and approximate work accounting.                      |
+| [Progress model](../src/gui/progress.rs)                                              | Mathematical bound label data, empirical work prior, sample rates, prediction gates, and ETA.                                             |
+| [GUI application](../src/gui/app.rs)                                                  | Job generations, report freshness, visible elapsed time, progress views, and completed result handling.                                   |
+| [GUI model](../src/gui/model.rs)                                                      | Form validation, preparation, and grouped-action replay into result rows.                                                                 |
+| [Solver facade](../src/gui/solver.rs)                                                 | Shared cancellable background-task interface and paired update snapshots.                                                                 |
+| [Native backend](../src/gui/solver_native.rs)                                         | Dedicated thread, bounded batches, cancellation checks, and worker-local time.                                                            |
+| [Browser backend](../src/gui/solver_wasm.rs)                                          | Worker creation and termination, startup handshake, message decoding, and exact integer transport.                                        |
+| [Worker implementation](../src/gui/worker.rs)                                         | Browser-side search execution, elapsed clock, and encoded progress/results.                                                               |
+| [Worker bootstrap](../solver-worker.js)                                               | Load the worker WASM module and start its handler.                                                                                        |
+| [Playback state](../src/gui/playback.rs) and [rendering](../src/gui/playback_view.rs) | Apply real ticks, animate their exact states, and keep wide displays readable.                                                            |
+| [CLI](../src/bin/cli.rs)                                                              | Parse inputs, run the synchronous solver, and print grouped replay states in a table.                                                     |
 
 The module documentation and source are the authority for implementation policy
 values that may change, such as collection thresholds, batch sizes, work-prior
@@ -1531,7 +1531,7 @@ counter rules and objective, rather than those tuning choices.
 
 - [OskarPuzzle's inspiration video][video]. The proofs in this document concern
   the explicitly defined project model rather than unstated physical details.
-- E. W. Dijkstra, [*A note on two problems in connexion with graphs*][dijkstra].
+- E. W. Dijkstra, [_A note on two problems in connexion with graphs_][dijkstra].
   The project adapts shortest-path ordering to additive lexicographic costs and
   exact sets of counter states; the puzzle-specific bounds and reduction are
   proved above.
