@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 use std::process::{Command, Output};
 
 use tally_problem::{Action, TallyCounter};
@@ -38,7 +40,7 @@ fn table_rows(output: &str) -> Vec<[&str; 5]> {
     output
         .lines()
         .filter_map(|line| {
-            let cells: Vec<_> = line.split(['|', '│']).map(str::trim).collect();
+            let cells: Vec<_> = line.split(['|', '│', '┆']).map(str::trim).collect();
             let row = match cells.as_slice() {
                 [action, direction, count, value, reset_index] => {
                     [*action, *direction, *count, *value, *reset_index]

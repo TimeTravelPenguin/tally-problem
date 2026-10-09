@@ -47,6 +47,45 @@ pub enum SearchResult {
     NotFound,
 }
 
+/// The current outcome of a bounded search step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchProgress {
+    /// More work remains. The count includes non-stale states visited so far.
+    InProgress {
+        visited_states: usize,
+    },
+    Complete(SearchResult),
+}
+
+/// An incremental solver that can yield between bounded portions of work.
+///
+/// The search has the same objectives and input requirements as [`search`].
+/// It owns its search state, so the initial counter can be changed or dropped.
+#[derive(Debug)]
+pub struct SearchSession {
+    state: SessionState,
+}
+
+#[derive(Debug)]
+enum SessionState {
+    Searching(ActiveSearch),
+    Complete(SearchResult),
+    Failed(SearchError),
+}
+
+#[derive(Debug)]
+struct ActiveSearch {
+    digit_count: usize,
+    value_states: usize,
+    start: usize,
+    target_value: usize,
+    distance: Vec<Cost>,
+    parent: Vec<usize>,
+    action: Vec<Option<Action>>,
+    queue: BinaryHeap<Reverse<(Cost, usize)>>,
+    visited_states: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Cost {
     // Field order is important: derived Ord is lexicographic.
@@ -68,132 +107,212 @@ const NO_PARENT: usize = usize::MAX;
 /// `10^(digit_count + 1)`; unrepresentable widths and allocation failures are
 /// reported as errors. An already displayed target needs no search allocation.
 pub fn search(counter: &TallyCounter, target: &[u8]) -> Result<SearchResult, SearchError> {
-    let digit_count = counter.values().len();
+    let mut session = SearchSession::new(counter, target)?;
 
-    if digit_count == 0 {
-        return Err(SearchError::InvalidDigitCount(digit_count));
+    loop {
+        if let SearchProgress::Complete(result) = session.advance(usize::MAX)? {
+            return Ok(result);
+        }
     }
+}
 
-    if target.len() != digit_count {
-        return Err(SearchError::InvalidTargetLength {
-            expected: digit_count,
-            actual: target.len(),
-        });
-    }
+impl SearchSession {
+    /// Validate the target and allocate the search state.
+    ///
+    /// An already displayed target completes without allocating search buffers.
+    pub fn new(counter: &TallyCounter, target: &[u8]) -> Result<Self, SearchError> {
+        let digit_count = counter.values().len();
 
-    if let Some(&invalid_digit) = target.iter().find(|&&digit| digit > 9) {
-        return Err(SearchError::InvalidTargetDigit(invalid_digit));
-    }
-
-    let exponent = digit_count
-        .try_into()
-        .map_err(|_| SearchError::CounterLengthTooLarge(digit_count))?;
-
-    let value_states = 10usize
-        .checked_pow(exponent)
-        .ok_or(SearchError::CounterLengthTooLarge(digit_count))?;
-
-    let state_count = value_states
-        .checked_mul(10)
-        .ok_or(SearchError::CounterLengthTooLarge(digit_count))?;
-
-    if counter.values() == target {
-        return Ok(SearchResult::Found(Vec::new()));
-    }
-
-    let start = encode_state(counter.values(), counter.reset_index());
-    let target_value = encode_values(target);
-
-    let mut distance = filled_buffer(INF, state_count)?;
-    let mut parent = filled_buffer(NO_PARENT, state_count)?;
-    let mut action = filled_buffer(None, state_count)?;
-    let mut queue = BinaryHeap::new();
-
-    distance[start] = Cost {
-        increments: 0,
-        reset_ticks: 0,
-    };
-
-    parent[start] = start;
-    queue
-        .try_reserve(1)
-        .map_err(|_| SearchError::AllocationFailed)?;
-
-    queue.push(Reverse((distance[start], start)));
-
-    while let Some(Reverse((cost, state))) = queue.pop() {
-        // Ignore stale queue entries.
-        if cost != distance[state] {
-            continue;
+        if digit_count == 0 {
+            return Err(SearchError::InvalidDigitCount(digit_count));
         }
 
-        let value = state / 10;
-        let reset = state % 10;
-
-        // The first target popped is optimal in both objectives.
-        if value == target_value {
-            return Ok(SearchResult::Found(reconstruct(
-                state, start, &parent, &action,
-            )?));
+        if target.len() != digit_count {
+            return Err(SearchError::InvalidTargetLength {
+                expected: digit_count,
+                actual: target.len(),
+            });
         }
 
-        let next = reset_forward_one(state, digit_count);
+        if let Some(&invalid_digit) = target.iter().find(|&&digit| digit > 9) {
+            return Err(SearchError::InvalidTargetDigit(invalid_digit));
+        }
 
-        relax(
-            state,
-            next,
-            Action::ResetForward(1),
-            Cost {
-                increments: cost.increments,
-                reset_ticks: cost.reset_ticks + 1,
-            },
-            &mut distance,
-            &mut parent,
-            &mut action,
-            &mut queue,
-        )?;
+        let exponent = digit_count
+            .try_into()
+            .map_err(|_| SearchError::CounterLengthTooLarge(digit_count))?;
 
-        let next_reset = (reset + 9) % 10;
-        let next = value * 10 + next_reset;
+        let value_states = 10usize
+            .checked_pow(exponent)
+            .ok_or(SearchError::CounterLengthTooLarge(digit_count))?;
 
-        relax(
-            state,
-            next,
-            Action::ResetBackward(1),
-            Cost {
-                increments: cost.increments,
-                reset_ticks: cost.reset_ticks + 1,
-            },
-            &mut distance,
-            &mut parent,
-            &mut action,
-            &mut queue,
-        )?;
+        let state_count = value_states
+            .checked_mul(10)
+            .ok_or(SearchError::CounterLengthTooLarge(digit_count))?;
 
-        let next_value = if value + 1 == value_states {
-            0
-        } else {
-            value + 1
+        if counter.values() == target {
+            return Ok(Self {
+                state: SessionState::Complete(SearchResult::Found(Vec::new())),
+            });
+        }
+
+        let start = encode_state(counter.values(), counter.reset_index());
+        let target_value = encode_values(target);
+
+        let mut distance = filled_buffer(INF, state_count)?;
+        let mut parent = filled_buffer(NO_PARENT, state_count)?;
+        let action = filled_buffer(None, state_count)?;
+        let mut queue = BinaryHeap::new();
+
+        distance[start] = Cost {
+            increments: 0,
+            reset_ticks: 0,
         };
 
-        let next = next_value * 10 + reset;
+        parent[start] = start;
+        queue
+            .try_reserve(1)
+            .map_err(|_| SearchError::AllocationFailed)?;
 
-        relax(
-            state,
-            next,
-            Action::Increment(1),
-            Cost {
-                increments: cost.increments + 1,
-                reset_ticks: cost.reset_ticks,
-            },
-            &mut distance,
-            &mut parent,
-            &mut action,
-            &mut queue,
-        )?;
+        queue.push(Reverse((distance[start], start)));
+
+        Ok(Self {
+            state: SessionState::Searching(ActiveSearch {
+                digit_count,
+                value_states,
+                start,
+                target_value,
+                distance,
+                parent,
+                action,
+                queue,
+                visited_states: 0,
+            }),
+        })
     }
 
-    Ok(SearchResult::NotFound)
+    /// Pop at most `max_states` queue entries, including stale entries.
+    ///
+    /// A zero budget observes the current state without doing search work.
+    /// Completion releases the search buffers and subsequent calls return the
+    /// same result. A failed step also retains its error for subsequent calls.
+    pub fn advance(&mut self, max_states: usize) -> Result<SearchProgress, SearchError> {
+        let progress = match &mut self.state {
+            SessionState::Searching(search) => search.advance(max_states),
+            SessionState::Complete(result) => {
+                return Ok(SearchProgress::Complete(result.clone()));
+            }
+
+            SessionState::Failed(error) => return Err(error.clone()),
+        };
+
+        match &progress {
+            Ok(SearchProgress::Complete(result)) => {
+                self.state = SessionState::Complete(result.clone());
+            }
+
+            Err(error) => {
+                self.state = SessionState::Failed(error.clone());
+            }
+
+            Ok(SearchProgress::InProgress { .. }) => {}
+        };
+
+        progress
+    }
+}
+
+impl ActiveSearch {
+    fn advance(&mut self, max_states: usize) -> Result<SearchProgress, SearchError> {
+        for _ in 0..max_states {
+            let Some(Reverse((cost, state))) = self.queue.pop() else {
+                return Ok(SearchProgress::Complete(SearchResult::NotFound));
+            };
+
+            // Stale entries consume the budget as well, keeping each step bounded.
+            if cost != self.distance[state] {
+                continue;
+            }
+
+            self.visited_states += 1;
+
+            let value = state / 10;
+            let reset = state % 10;
+
+            // The first target popped is optimal in both objectives.
+            if value == self.target_value {
+                return Ok(SearchProgress::Complete(SearchResult::Found(reconstruct(
+                    state,
+                    self.start,
+                    &self.parent,
+                    &self.action,
+                )?)));
+            }
+
+            let next = reset_forward_one(state, self.digit_count);
+
+            relax(
+                state,
+                next,
+                Action::ResetForward(1),
+                Cost {
+                    increments: cost.increments,
+                    reset_ticks: cost.reset_ticks + 1,
+                },
+                &mut self.distance,
+                &mut self.parent,
+                &mut self.action,
+                &mut self.queue,
+            )?;
+
+            let next_reset = (reset + 9) % 10;
+            let next = value * 10 + next_reset;
+
+            relax(
+                state,
+                next,
+                Action::ResetBackward(1),
+                Cost {
+                    increments: cost.increments,
+                    reset_ticks: cost.reset_ticks + 1,
+                },
+                &mut self.distance,
+                &mut self.parent,
+                &mut self.action,
+                &mut self.queue,
+            )?;
+
+            let next_value = if value + 1 == self.value_states {
+                0
+            } else {
+                value + 1
+            };
+
+            let next = next_value * 10 + reset;
+
+            relax(
+                state,
+                next,
+                Action::Increment(1),
+                Cost {
+                    increments: cost.increments + 1,
+                    reset_ticks: cost.reset_ticks,
+                },
+                &mut self.distance,
+                &mut self.parent,
+                &mut self.action,
+                &mut self.queue,
+            )?;
+        }
+
+        if self.queue.is_empty() {
+            return Ok(SearchProgress::Complete(SearchResult::NotFound));
+        }
+
+        Ok(SearchProgress::InProgress {
+            visited_states: self.visited_states,
+        })
+    }
 }
 
 fn filled_buffer<T: Clone>(value: T, len: usize) -> Result<Vec<T>, SearchError> {
@@ -378,6 +497,111 @@ mod tests {
         assert_eq!(
             search(&counter, &[0, 1, 2]),
             Ok(SearchResult::Found(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn session_respects_zero_and_single_entry_budgets() {
+        let counter = TallyCounter::new(2).unwrap();
+        let mut session = SearchSession::new(&counter, &[1, 2]).unwrap();
+
+        assert_eq!(
+            session.advance(0),
+            Ok(SearchProgress::InProgress { visited_states: 0 })
+        );
+        assert_eq!(
+            session.advance(1),
+            Ok(SearchProgress::InProgress { visited_states: 1 })
+        );
+        assert_eq!(
+            session.advance(0),
+            Ok(SearchProgress::InProgress { visited_states: 1 })
+        );
+    }
+
+    #[test]
+    fn stale_queue_entries_consume_the_session_budget() {
+        let mut counter = TallyCounter::new(2).unwrap();
+        counter.set_values(vec![5, 0]).unwrap();
+
+        let mut session = SearchSession::new(&counter, &[5, 1]).unwrap();
+        let SessionState::Searching(search) = &mut session.state else {
+            panic!("An unmatched target needs a search");
+        };
+
+        // This entry sorts before the start but no longer matches its distance.
+        search.queue.push(Reverse((
+            Cost {
+                increments: 0,
+                reset_ticks: 0,
+            },
+            0,
+        )));
+
+        assert_eq!(
+            session.advance(1),
+            Ok(SearchProgress::InProgress { visited_states: 0 })
+        );
+        assert_eq!(
+            session.advance(1),
+            Ok(SearchProgress::InProgress { visited_states: 1 })
+        );
+    }
+
+    #[test]
+    fn bounded_sessions_preserve_the_full_search_result() {
+        for (values, reset_index, target) in [
+            (vec![0, 0], 0, vec![9, 8]),
+            (vec![7, 2], 5, vec![0, 3]),
+            (vec![0, 0, 0], 9, vec![1, 2, 3]),
+        ] {
+            let mut counter = TallyCounter::new(values.len()).unwrap();
+            counter.set_values(values).unwrap();
+            counter.set_reset_index(reset_index).unwrap();
+
+            let expected = search(&counter, &target).unwrap();
+
+            for budget in [1, 7, 64] {
+                let mut session = SearchSession::new(&counter, &target).unwrap();
+                let mut previous_visited = 0;
+
+                loop {
+                    match session.advance(budget).unwrap() {
+                        SearchProgress::InProgress { visited_states } => {
+                            assert!(visited_states >= previous_visited);
+                            assert!(visited_states - previous_visited <= budget);
+                            previous_visited = visited_states;
+                        }
+
+                        SearchProgress::Complete(result) => {
+                            assert_eq!(result, expected);
+                            break;
+                        }
+                    }
+                }
+
+                assert!(matches!(session.state, SessionState::Complete(_)));
+                assert_eq!(
+                    session.advance(0),
+                    Ok(SearchProgress::Complete(expected.clone()))
+                );
+                assert_eq!(
+                    session.advance(1),
+                    Ok(SearchProgress::Complete(expected.clone()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn already_matched_sessions_are_complete_without_search_buffers() {
+        let counter = TallyCounter::new(3).unwrap();
+        let mut session = SearchSession::new(&counter, &[0, 0, 0]).unwrap();
+
+        assert!(matches!(session.state, SessionState::Complete(_)));
+        assert_eq!(
+            session.advance(0),
+            Ok(SearchProgress::Complete(SearchResult::Found(Vec::new())))
         );
     }
 

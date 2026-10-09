@@ -2,12 +2,29 @@
 name = "tally-problem"
 version = "0.1.0"
 edition = "2024"
+default-run = "tally-problem"
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:comfy-table"]
+gui = ["dep:iced", "dep:gloo-timers", "dep:webbrowser"]
 
 [[bin]]
 name = "tally-problem"
 path = "src/bin/cli.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "tally-gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
 
 [dependencies]
-clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
-comfy-table = { version = "8.0.0", default-features = false }
+clap = { version = "4.6.7", features = ["derive", "wrap_help"], optional = true }
+comfy-table = { version = "8.0.0", default-features = false, optional = true }
+iced = { version = "0.14.0", default-features = false, features = ["advanced", "crisp", "fira-sans", "thread-pool", "wayland", "web-colors", "webgl", "wgpu", "x11"], optional = true }
 thiserror = "2.0.21"
+webbrowser = { version = "1.2.4", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-timers = { version = "0.3.0", features = ["futures"], optional = true }
