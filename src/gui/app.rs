@@ -3,14 +3,16 @@ use std::time::Duration;
 use iced::keyboard::{self, Key, key::Named};
 use iced::time::Instant;
 use iced::widget::{
-    button, column, container, operation, progress_bar, responsive, row, scrollable, sensor, space,
-    text, text_input, tooltip,
+    button, column, container, operation, progress_bar, responsive, row, scrollable, sensor,
+    slider, space, text, text_input, tooltip,
 };
 use iced::{Border, Color, Element, Event, Fill, Length, Subscription, Task, Theme, event, mouse};
 use tally_problem::{Action, SearchProgress, SearchStatistics};
 
 use crate::focus;
 use crate::model::{Form, PreparedSearch, Solution, Step};
+use crate::playback::Playback;
+use crate::playback_view;
 use crate::progress::{ProgressEstimate, TimingPrediction};
 use crate::solver;
 
@@ -24,6 +26,11 @@ enum Focus {
     ResetIndex,
     Solve,
     ResetForm,
+    PlaybackPrevious,
+    PlaybackToggle,
+    PlaybackNext,
+    PlaybackRestart,
+    PlaybackSpeed,
     Results,
     Video,
 }
@@ -36,6 +43,11 @@ impl Focus {
             Self::ResetIndex => "reset-input",
             Self::Solve => "solve-button",
             Self::ResetForm => "reset-button",
+            Self::PlaybackPrevious => "playback-previous",
+            Self::PlaybackToggle => "playback-toggle",
+            Self::PlaybackNext => "playback-next",
+            Self::PlaybackRestart => "playback-restart",
+            Self::PlaybackSpeed => "playback-speed",
             Self::Results => "results-panel",
             Self::Video => "video-button",
         }
@@ -46,7 +58,7 @@ impl Focus {
             Self::Target => "target-field",
             Self::Start => "start-field",
             Self::ResetIndex => "reset-field",
-            Self::Solve | Self::ResetForm | Self::Results | Self::Video => self.id(),
+            _ => self.id(),
         }
     }
 
@@ -65,7 +77,7 @@ impl Focus {
                 "The current knob position (0–9). It determines which digits the next forward \
                 reset pushes; it is not the number of reset ticks.",
             ),
-            Self::Solve | Self::ResetForm | Self::Results | Self::Video => None,
+            _ => None,
         }
     }
 
@@ -73,8 +85,14 @@ impl Focus {
         match self {
             Self::Solve => Some(Message::SolvePressed),
             Self::ResetForm => Some(Message::ResetForm),
+            Self::PlaybackPrevious => Some(Message::PlaybackPrevious),
+            Self::PlaybackToggle => Some(Message::PlaybackToggle),
+            Self::PlaybackNext => Some(Message::PlaybackNext),
+            Self::PlaybackRestart => Some(Message::PlaybackRestart),
             Self::Video => Some(Message::OpenVideo),
-            Self::Target | Self::Start | Self::ResetIndex | Self::Results => None,
+            Self::Target | Self::Start | Self::ResetIndex | Self::PlaybackSpeed | Self::Results => {
+                None
+            }
         }
     }
 }
@@ -109,6 +127,9 @@ pub struct Planner {
     visited_states: usize,
     completed_elapsed: Option<Duration>,
     solution: Option<Solution>,
+    playback: Option<Playback>,
+    playback_now: Instant,
+    playback_revision: u64,
     error: Option<String>,
     video_error: Option<String>,
 }
@@ -124,6 +145,13 @@ pub enum Message {
     OpenVideo,
     Progress(u64, Result<solver::Update, String>),
     SearchFrame(u64, Instant),
+    PlaybackToggle,
+    PlaybackPrevious,
+    PlaybackNext,
+    PlaybackRestart,
+    PlaybackSpeed(f32),
+    PlaybackSpeedFocused,
+    PlaybackFrame(u64, u64, Instant),
     KeyPressed(Key, keyboard::Modifiers),
     PointerPressed,
     InputFocused(u64, &'static str, bool),
@@ -142,6 +170,9 @@ impl Planner {
                 visited_states: 0,
                 completed_elapsed: None,
                 solution: None,
+                playback: None,
+                playback_now: Instant::now(),
+                playback_revision: 0,
                 error: None,
                 video_error: None,
             },
@@ -251,6 +282,9 @@ impl Planner {
 
                             match job.prepared.finish(result) {
                                 Ok(solution) => {
+                                    self.playback = Some(Playback::new(&solution));
+                                    self.playback_now = Instant::now();
+                                    self.playback_revision += 1;
                                     self.solution = Some(solution);
                                     self.completed_elapsed = Some(elapsed);
                                 }
@@ -274,6 +308,67 @@ impl Planner {
                     job.elapsed = job
                         .elapsed
                         .max(now.saturating_duration_since(job.started_at));
+                }
+            }
+
+            Message::PlaybackSpeedFocused => {
+                if self.playback.is_some() {
+                    return self.focus(Focus::PlaybackSpeed);
+                }
+            }
+
+            message @ (Message::PlaybackToggle
+            | Message::PlaybackPrevious
+            | Message::PlaybackNext
+            | Message::PlaybackRestart
+            | Message::PlaybackSpeed(_)) => {
+                let requested_focus = match &message {
+                    Message::PlaybackPrevious => Focus::PlaybackPrevious,
+                    Message::PlaybackNext => Focus::PlaybackNext,
+                    Message::PlaybackRestart => Focus::PlaybackRestart,
+                    Message::PlaybackSpeed(_) => Focus::PlaybackSpeed,
+                    _ => Focus::PlaybackToggle,
+                };
+
+                if let (Some(solution), Some(playback)) = (&self.solution, &mut self.playback) {
+                    let now = Instant::now();
+
+                    match message {
+                        Message::PlaybackToggle if playback.is_playing() => playback.pause(),
+                        Message::PlaybackToggle => playback.play(solution, now),
+                        Message::PlaybackPrevious => playback.previous(solution, now),
+                        Message::PlaybackNext => playback.next(solution, now),
+                        Message::PlaybackRestart => playback.restart(solution),
+                        Message::PlaybackSpeed(speed) => playback.set_speed(speed, now),
+                        _ => unreachable!(),
+                    }
+
+                    self.playback_now = now;
+                    self.playback_revision += 1;
+                    let focus = if self.focus_order().contains(&requested_focus) {
+                        requested_focus
+                    } else {
+                        Focus::PlaybackToggle
+                    };
+
+                    return self.focus(focus);
+                }
+            }
+
+            Message::PlaybackFrame(generation, revision, now) => {
+                if generation == self.generation
+                    && revision == self.playback_revision
+                    && let (Some(solution), Some(playback)) = (&self.solution, &mut self.playback)
+                {
+                    self.playback_now = now.max(self.playback_now);
+                    playback.advance(solution, self.playback_now);
+                    self.playback_revision += 1;
+
+                    if let Some(focus) = self.focus
+                        && !self.focus_order().contains(&focus)
+                    {
+                        return self.focus(Focus::PlaybackToggle);
+                    }
                 }
             }
 
@@ -325,6 +420,8 @@ impl Planner {
         self.job = None;
         self.visited_states = 0;
         self.completed_elapsed = None;
+        self.playback = None;
+        self.playback_revision += 1;
     }
 
     fn changed(&mut self, field: Focus) {
@@ -402,6 +499,22 @@ impl Planner {
         controls.push(Focus::ResetForm);
 
         if self.solution.is_some() {
+            if let Some(playback) = &self.playback
+                && (playback.can_next() || playback.can_previous())
+            {
+                if playback.can_previous() {
+                    controls.push(Focus::PlaybackPrevious);
+                }
+
+                controls.push(Focus::PlaybackToggle);
+
+                if playback.can_next() {
+                    controls.push(Focus::PlaybackNext);
+                }
+
+                controls.extend([Focus::PlaybackRestart, Focus::PlaybackSpeed]);
+            }
+
             controls.push(Focus::Results);
         }
 
@@ -411,6 +524,22 @@ impl Planner {
     }
 
     fn key_pressed(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Message> {
+        if self.focus == Some(Focus::PlaybackSpeed)
+            && let Some(playback) = &self.playback
+        {
+            let speed = match key.as_ref() {
+                Key::Named(Named::ArrowLeft | Named::ArrowDown) => Some(playback.speed() - 1.0),
+                Key::Named(Named::ArrowRight | Named::ArrowUp) => Some(playback.speed() + 1.0),
+                Key::Named(Named::Home) => Some(1.0),
+                Key::Named(Named::End) => Some(8.0),
+                _ => None,
+            };
+
+            if let Some(speed) = speed {
+                return self.update(Message::PlaybackSpeed(speed));
+            }
+        }
+
         match key.as_ref() {
             Key::Named(Named::Tab) => {
                 let order = self.focus_order();
@@ -448,6 +577,12 @@ impl Planner {
             Key::Named(Named::End) => return operation::snap_to_end(PAGE),
             Key::Named(Named::Escape) if self.job.is_some() => {
                 return self.update(Message::ResetForm);
+            }
+
+            Key::Named(Named::Escape)
+                if self.playback.as_ref().is_some_and(Playback::is_playing) =>
+            {
+                return self.update(Message::PlaybackToggle);
             }
 
             _ => {}
@@ -661,6 +796,187 @@ impl Planner {
         card(content, false)
     }
 
+    fn player<'a>(&'a self, playback: &'a Playback, compact: bool) -> Element<'a, Message> {
+        let frame = playback.frame(self.playback_now);
+        let generation = self.generation;
+        let revision = self.playback_revision;
+        let mut display = sensor(playback_view::view(frame)).key((generation, revision));
+
+        if let Some(delay) = playback.next_frame_delay(self.playback_now) {
+            display = display
+                .delay(delay)
+                .on_show(move |_| Message::PlaybackFrame(generation, revision, Instant::now()));
+        }
+
+        let status = if frame.playing {
+            "Playing"
+        } else if playback.is_finished() {
+            "Target reached"
+        } else if frame.completed_ticks == 0 {
+            "Ready to play"
+        } else {
+            "Paused"
+        };
+        let position = frame
+            .active_step
+            .map_or_else(|| "Start".to_owned(), |idx| format!("Step {}", idx + 1));
+        let mut content = column![
+            display,
+            playback_view::instruction(
+                frame.previous_instruction,
+                frame.instruction,
+                frame.progress,
+            ),
+            row![
+                text(format!(
+                    "{position} · Tick {} of {}",
+                    frame.completed_ticks, frame.total_ticks
+                ))
+                .size(12)
+                .style(text::secondary),
+                space().width(Fill),
+                text(status).size(12).style(if playback.is_finished() {
+                    text::success
+                } else {
+                    text::secondary
+                }),
+            ]
+            .align_y(iced::Center),
+            search_bar(
+                if frame.total_ticks == 0 {
+                    100.0
+                } else {
+                    (frame.completed_ticks as f64 / frame.total_ticks as f64 * 100.0) as f32
+                },
+                playback.is_finished(),
+            ),
+        ]
+        .spacing(16);
+
+        if frame.total_ticks > 0 {
+            let previous = player_button(
+                if compact { "Back" } else { "Previous" },
+                Focus::PlaybackPrevious,
+                Message::PlaybackPrevious,
+                playback.can_previous(),
+                self.focus,
+                false,
+            );
+            let toggle = player_button(
+                if playback.is_playing() {
+                    "Pause"
+                } else {
+                    "Play"
+                },
+                Focus::PlaybackToggle,
+                Message::PlaybackToggle,
+                true,
+                self.focus,
+                true,
+            );
+            let next = player_button(
+                "Next",
+                Focus::PlaybackNext,
+                Message::PlaybackNext,
+                playback.can_next(),
+                self.focus,
+                false,
+            );
+            let restart = container(player_button(
+                "Restart",
+                Focus::PlaybackRestart,
+                Message::PlaybackRestart,
+                true,
+                self.focus,
+                false,
+            ))
+            .width(if compact { Fill } else { Length::Fixed(96.0) });
+            let transport = row![
+                container(previous).width(Fill),
+                container(toggle).width(Fill),
+                container(next).width(Fill),
+            ]
+            .spacing(8);
+            let controls: Element<'_, Message> = if compact {
+                column![transport, restart].spacing(8).into()
+            } else {
+                row![transport.width(Fill), restart].spacing(12).into()
+            };
+
+            let speed_focused = self.focus == Some(Focus::PlaybackSpeed);
+            let help = tooltip(
+                container(text("?").size(14).style(text::secondary))
+                    .center_x(16)
+                    .center_y(20)
+                    .style(container::rounded_box),
+                container(
+                    text(
+                        "One tick is one increment or one turn of the reset knob. \
+                    Select 1–8 ticks per second. When focused, use the arrow keys to adjust speed.",
+                    )
+                    .size(13),
+                )
+                .width(280),
+                tooltip::Position::Top,
+            )
+            .gap(8)
+            .padding(10)
+            .snap_within_viewport(true)
+            .style(container::rounded_box);
+            let speed = container(
+                column![
+                    row![
+                        row![text("Speed").size(13), help]
+                            .spacing(2)
+                            .align_y(iced::Center),
+                        space().width(Fill),
+                        text(format!("{:.0} ticks/s", playback.speed()))
+                            .size(13)
+                            .style(text::secondary),
+                    ]
+                    .align_y(iced::Center),
+                    focus::keyboard_gate(
+                        slider(1.0..=8.0, playback.speed(), Message::PlaybackSpeed)
+                            .step(1.0_f32)
+                            .on_release(Message::PlaybackSpeedFocused),
+                        speed_focused,
+                    ),
+                ]
+                .spacing(10),
+            )
+            .padding(12)
+            .id(Focus::PlaybackSpeed.id())
+            .width(Fill)
+            .style(move |theme: &Theme| container::Style {
+                border: Border {
+                    color: if speed_focused {
+                        theme.extended_palette().primary.base.color
+                    } else {
+                        theme.extended_palette().background.strong.color
+                    },
+                    width: if speed_focused { 2.0 } else { 1.0 },
+                    radius: 8.0.into(),
+                },
+                ..container::Style::default()
+            });
+
+            content = content.push(controls).push(speed);
+        }
+
+        container(content)
+            .padding(if compact { 12 } else { 20 })
+            .width(Fill)
+            .style(|theme: &Theme| container::Style {
+                background: Some(theme.extended_palette().background.base.color.into()),
+                border: Border {
+                    radius: 12.0.into(),
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            })
+            .into()
+    }
+
     fn results<'a>(&'a self, solution: &'a Solution, compact: bool) -> Element<'a, Message> {
         let stats = [
             stat("Minimum increments", solution.increments.to_string(), false),
@@ -686,19 +1002,27 @@ impl Planner {
                 .style(text::secondary)
             ]
             .align_y(iced::Center),
-            text("Scroll to follow every step. Page Up / Page Down also work.")
-                .size(13)
-                .style(text::secondary),
-            step_row(
+        ]
+        .spacing(16);
+
+        if let Some(playback) = &self.playback {
+            steps = steps.push(self.player(playback, compact));
+        }
+
+        steps = steps
+            .push(
+                text("Scroll to follow every step. Page Up / Page Down also work.")
+                    .size(13)
+                    .style(text::secondary),
+            )
+            .push(step_row(
                 "Start",
                 "Initial state",
                 &solution.start,
                 solution.initial_reset_index,
                 None,
-                compact
-            ),
-        ]
-        .spacing(12);
+                compact,
+            ));
 
         if solution.steps.is_empty() {
             steps = steps.push(
@@ -739,6 +1063,28 @@ impl Planner {
             )
             .into()
     }
+}
+
+fn player_button<'a>(
+    label: &'a str,
+    control: Focus,
+    message: Message,
+    enabled: bool,
+    focus: Option<Focus>,
+    primary: bool,
+) -> Element<'a, Message> {
+    let focused = focus == Some(control);
+
+    container(
+        button(container(text(label).size(14)).center_x(Fill))
+            .padding([10, 12])
+            .width(Fill)
+            .on_press_maybe(enabled.then_some(message))
+            .style(move |theme, status| focused_button(theme, status, focused, primary)),
+    )
+    .id(control.id())
+    .width(Fill)
+    .into()
 }
 
 fn elapsed_label(elapsed: Duration) -> String {
@@ -1009,6 +1355,178 @@ fn step_row<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn planner_with_playback() -> Planner {
+        let (mut planner, _) = Planner::new();
+        planner.form.target = "12".to_owned();
+        let solution = planner
+            .form
+            .prepare()
+            .unwrap()
+            .finish(tally_problem::SearchResult::Found(vec![
+                Action::ResetForward(1),
+                Action::Increment(1),
+            ]))
+            .unwrap();
+        planner.playback = Some(Playback::new(&solution));
+        planner.solution = Some(solution);
+
+        planner
+    }
+
+    #[test]
+    fn keyboard_reaches_player_controls_and_adjusts_bounded_speed() {
+        let mut planner = planner_with_playback();
+        planner.focus = Some(Focus::ResetForm);
+
+        for expected in [
+            Focus::PlaybackToggle,
+            Focus::PlaybackNext,
+            Focus::PlaybackRestart,
+            Focus::PlaybackSpeed,
+        ] {
+            let _ = planner.key_pressed(Key::Named(Named::Tab), keyboard::Modifiers::empty());
+            assert_eq!(planner.focus, Some(expected));
+        }
+
+        let _ = planner.key_pressed(Key::Named(Named::ArrowRight), keyboard::Modifiers::empty());
+        assert_eq!(planner.playback.as_ref().unwrap().speed(), 4.0);
+        let _ = planner.key_pressed(Key::Named(Named::Home), keyboard::Modifiers::empty());
+        assert_eq!(planner.playback.as_ref().unwrap().speed(), 1.0);
+        let _ = planner.key_pressed(Key::Named(Named::End), keyboard::Modifiers::empty());
+        let _ = planner.key_pressed(Key::Named(Named::ArrowRight), keyboard::Modifiers::empty());
+        assert_eq!(planner.playback.as_ref().unwrap().speed(), 8.0);
+
+        let _ = planner.key_pressed(Key::Named(Named::Tab), keyboard::Modifiers::empty());
+        assert_eq!(planner.focus, Some(Focus::Results));
+        let _ = planner.key_pressed(Key::Named(Named::Tab), keyboard::Modifiers::SHIFT);
+        assert_eq!(planner.focus, Some(Focus::PlaybackSpeed));
+
+        let _ = planner.focus(Focus::PlaybackToggle);
+        let _ = planner.key_pressed(Key::Named(Named::Space), keyboard::Modifiers::empty());
+        assert!(planner.playback.as_ref().unwrap().is_playing());
+        let _ = planner.key_pressed(Key::Named(Named::Escape), keyboard::Modifiers::empty());
+        assert!(!planner.playback.as_ref().unwrap().is_playing());
+    }
+
+    #[test]
+    fn manual_player_controls_pause_and_keep_disabled_controls_out_of_focus() {
+        let mut planner = planner_with_playback();
+        let _ = planner.update(Message::PlaybackToggle);
+        let _ = planner.update(Message::PlaybackNext);
+        let playback = planner.playback.as_ref().unwrap();
+        assert!(!playback.is_playing());
+        assert_eq!(playback.frame(planner.playback_now).current_digits, &[1, 1]);
+        assert!(planner.focus_order().contains(&Focus::PlaybackPrevious));
+
+        let _ = planner.update(Message::PlaybackNext);
+        let playback = planner.playback.as_ref().unwrap();
+        assert!(playback.is_finished());
+        assert_eq!(playback.frame(planner.playback_now).current_digits, &[1, 2]);
+        assert!(!planner.focus_order().contains(&Focus::PlaybackNext));
+        assert_eq!(planner.focus, Some(Focus::PlaybackToggle));
+
+        let _ = planner.update(Message::PlaybackPrevious);
+        assert_eq!(
+            planner
+                .playback
+                .as_ref()
+                .unwrap()
+                .frame(planner.playback_now)
+                .current_digits,
+            &[1, 1],
+        );
+
+        let _ = planner.update(Message::PlaybackPrevious);
+        assert_eq!(planner.focus, Some(Focus::PlaybackToggle));
+        assert!(!planner.focus_order().contains(&Focus::PlaybackPrevious));
+        let _ = planner.update(Message::PlaybackSpeed(6.0));
+        let _ = planner.update(Message::PlaybackRestart);
+        let playback = planner.playback.as_ref().unwrap();
+        assert_eq!(playback.speed(), 6.0);
+        assert_eq!(playback.frame(planner.playback_now).current_digits, &[0, 0]);
+        assert_eq!(playback.frame(planner.playback_now).completed_ticks, 0);
+        assert!(!playback.is_playing());
+    }
+
+    #[test]
+    fn releasing_the_speed_slider_preserves_keyboard_focus_after_pointer_press() {
+        let mut planner = planner_with_playback();
+        let _ = planner.update(Message::PlaybackSpeed(4.0));
+        let _ = planner.update(Message::PointerPressed);
+        assert_eq!(planner.focus, None);
+
+        let _ = planner.update(Message::PlaybackSpeedFocused);
+        assert_eq!(planner.focus, Some(Focus::PlaybackSpeed));
+        let _ = planner.key_pressed(Key::Named(Named::Tab), keyboard::Modifiers::empty());
+        assert_eq!(planner.focus, Some(Focus::Results));
+        assert_eq!(planner.playback.as_ref().unwrap().speed(), 4.0);
+    }
+
+    #[test]
+    fn player_frames_cannot_resume_paused_restarted_or_discarded_playback() {
+        let mut planner = planner_with_playback();
+        let _ = planner.update(Message::PlaybackToggle);
+        let generation = planner.generation;
+        let old_revision = planner.playback_revision;
+        let now = planner.playback_now + Duration::from_secs(1);
+        let _ = planner.update(Message::PlaybackToggle);
+        let _ = planner.update(Message::PlaybackFrame(generation, old_revision, now));
+        assert_eq!(
+            planner
+                .playback
+                .as_ref()
+                .unwrap()
+                .frame(now)
+                .completed_ticks,
+            0
+        );
+
+        let _ = planner.update(Message::PlaybackToggle);
+        let revision = planner.playback_revision;
+        let _ = planner.update(Message::PlaybackFrame(generation, revision, now));
+        assert_eq!(
+            planner
+                .playback
+                .as_ref()
+                .unwrap()
+                .frame(now)
+                .completed_ticks,
+            1
+        );
+        let _ = planner.update(Message::PlaybackFrame(
+            generation,
+            revision,
+            now + Duration::from_secs(1),
+        ));
+        assert_eq!(
+            planner
+                .playback
+                .as_ref()
+                .unwrap()
+                .frame(now)
+                .completed_ticks,
+            1
+        );
+
+        let old_revision = planner.playback_revision;
+        let _ = planner.update(Message::PlaybackRestart);
+        let _ = planner.update(Message::PlaybackFrame(generation, old_revision, now));
+        assert_eq!(
+            planner
+                .playback
+                .as_ref()
+                .unwrap()
+                .frame(now)
+                .completed_ticks,
+            0
+        );
+
+        let _ = planner.update(Message::TargetChanged("34".to_owned()));
+        let _ = planner.update(Message::PlaybackFrame(generation, old_revision, now));
+        assert!(planner.playback.is_none());
+        assert!(planner.solution.is_none());
+    }
 
     fn report(progress: SearchProgress) -> solver::Update {
         let visited_groups = match &progress {

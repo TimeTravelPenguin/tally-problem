@@ -7,6 +7,10 @@ knob. Forward turns can move the digit wheels; backward turns reposition the kno
 changing the displayed value, but it repositions the reset index internally (see the video
 below for a physical intuition). Find the fewest increments, then the fewest reset ticks.
 
+After solving, play the sequence to watch the digit wheels and reset index move.
+Playback starts paused at three ticks per second, with controls to step, restart,
+and change the speed.
+
 <details>
 
 <summary>A longer example</summary>

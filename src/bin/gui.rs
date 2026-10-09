@@ -4,6 +4,10 @@ mod app;
 mod focus;
 #[path = "../gui/model.rs"]
 mod model;
+#[path = "../gui/playback.rs"]
+mod playback;
+#[path = "../gui/playback_view.rs"]
+mod playback_view;
 #[path = "../gui/progress.rs"]
 mod progress;
 #[path = "../gui/solver.rs"]

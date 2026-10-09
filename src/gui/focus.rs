@@ -1,8 +1,148 @@
 use iced::advanced::widget::{
     Id, Operation, operate,
     operation::{Focusable, Outcome, Scrollable},
+    tree::{self, Tree},
 };
-use iced::{Rectangle, Task, Vector};
+use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer};
+use iced::{Element, Event, Length, Rectangle, Size, Task, Vector, keyboard};
+
+/// Keep hovered controls from handling keys intended for another focused input.
+pub fn keyboard_gate<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+    enabled: bool,
+) -> Element<'a, Message> {
+    Element::new(KeyboardGate {
+        content: content.into(),
+        enabled,
+    })
+}
+
+struct KeyboardGate<'a, Message, Theme, Renderer>
+where
+    Renderer: renderer::Renderer,
+{
+    content: Element<'a, Message, Theme, Renderer>,
+    enabled: bool,
+}
+
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for KeyboardGate<'_, Message, Theme, Renderer>
+where
+    Renderer: renderer::Renderer,
+{
+    fn tag(&self) -> tree::Tag {
+        self.content.as_widget().tag()
+    }
+
+    fn state(&self) -> tree::State {
+        self.content.as_widget().state()
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        self.content.as_widget().children()
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        self.content.as_widget().diff(tree);
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content.as_widget_mut().layout(tree, renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        if !self.enabled
+            && matches!(
+                event,
+                Event::Keyboard(
+                    keyboard::Event::KeyPressed { .. } | keyboard::Event::KeyReleased { .. }
+                )
+            )
+        {
+            return;
+        }
+
+        self.content.as_widget_mut().update(
+            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content
+            .as_widget()
+            .draw(tree, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, operation);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.content
+            .as_widget()
+            .mouse_interaction(tree, layout, cursor, viewport, renderer)
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        self.content
+            .as_widget_mut()
+            .overlay(tree, layout, renderer, viewport, translation)
+    }
+}
 
 pub fn reveal(target: &'static str) -> Task<Option<f32>> {
     operate(Reveal {
@@ -107,5 +247,106 @@ mod tests {
             visible_offset(rect(0.0, 20.0), 0.0, rect(30.0, 24.0)),
             Some(14.0)
         );
+    }
+
+    // Iced's null renderer is available in debug builds, which lets these tests
+    // exercise the real slider event path without a desktop or browser window.
+    #[cfg(debug_assertions)]
+    mod keyboard_gate {
+        use super::*;
+        use iced::advanced::clipboard;
+        use iced::keyboard::{Key, Location, Modifiers, key};
+
+        fn slider_events(enabled: bool, events: &[Event]) -> (Vec<f32>, Vec<bool>) {
+            let mut widget: Element<'_, f32, iced::Theme, ()> = Element::new(KeyboardGate {
+                content: iced::widget::slider(1.0..=8.0, 3.0, |value| value).into(),
+                enabled,
+            });
+            let mut tree = Tree::new(&widget);
+            let node = widget.as_widget_mut().layout(
+                &mut tree,
+                &(),
+                &layout::Limits::new(Size::ZERO, Size::new(100.0, 16.0)),
+            );
+            let layout = Layout::new(&node);
+            let viewport = layout.bounds();
+            let cursor = mouse::Cursor::Available(viewport.center());
+            let mut clipboard = clipboard::Null;
+            let mut messages = Vec::new();
+            let mut captured = Vec::new();
+
+            for event in events {
+                let mut shell = Shell::new(&mut messages);
+                widget.as_widget_mut().update(
+                    &mut tree,
+                    event,
+                    layout,
+                    cursor,
+                    &(),
+                    &mut clipboard,
+                    &mut shell,
+                    &viewport,
+                );
+                captured.push(shell.is_event_captured());
+            }
+
+            (messages, captured)
+        }
+
+        #[test]
+        fn hovered_slider_handles_arrow_keys_only_when_keyboard_is_enabled() {
+            let arrow = Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Named(key::Named::ArrowUp),
+                modified_key: Key::Named(key::Named::ArrowUp),
+                physical_key: key::Physical::Code(key::Code::ArrowUp),
+                location: Location::Standard,
+                modifiers: Modifiers::empty(),
+                text: None,
+                repeat: false,
+            });
+
+            assert_eq!(
+                slider_events(false, std::slice::from_ref(&arrow)),
+                (vec![], vec![false])
+            );
+            assert_eq!(slider_events(true, &[arrow]), (vec![4.0], vec![true]));
+        }
+
+        #[test]
+        fn disabling_keyboard_keeps_pointer_touch_and_modifier_events_working() {
+            let (messages, captured) = slider_events(
+                false,
+                &[Event::Mouse(mouse::Event::ButtonPressed(
+                    mouse::Button::Left,
+                ))],
+            );
+
+            assert!(!messages.is_empty());
+            assert_eq!(captured, vec![true]);
+
+            let (messages, captured) = slider_events(
+                false,
+                &[Event::Touch(iced::touch::Event::FingerPressed {
+                    id: iced::touch::Finger(0),
+                    position: iced::Point::new(50.0, 8.0),
+                })],
+            );
+
+            assert!(!messages.is_empty());
+            assert_eq!(captured, vec![true]);
+
+            assert_eq!(
+                slider_events(
+                    false,
+                    &[
+                        Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::CTRL)),
+                        Event::Mouse(mouse::Event::WheelScrolled {
+                            delta: mouse::ScrollDelta::Lines { x: 0.0, y: 1.0 },
+                        }),
+                    ],
+                ),
+                (vec![4.0], vec![false, true]),
+            );
+        }
     }
 }
