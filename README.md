@@ -1,11 +1,11 @@
 # Tally Puzzle Optimizer
 
+[Try the solver here](https://timetravelpenguin.github.io/tally-problem/) · Inspired by [OskarPuzzle's video][video]
+
 Reach a chosen value on a mechanical tally counter using increments and turns of the reset
 knob. Forward turns can move the digit wheels; backward turns reposition the knob without
 changing the displayed value, but it repositions the reset index internally (see the video
 below for a physical intuition). Find the fewest increments, then the fewest reset ticks.
-
-Inspired by [OskarPuzzle's video][video].
 
 <details>
 
@@ -162,5 +162,25 @@ path:
 just build-web
 just build-web /tally-problem/
 ```
+
+## Acknowledgement of AI Usage
+
+Parts of this project used OpenAI's GPT 6.1 Sol with Ultra "effort".
+
+The core solver and CLI were initially all my own work, using Dijkstra's algorithm to
+optimise finding solutions. However, as I grew more curious and required further
+optimisation, I relied on AI to quickly iterate new ideas and implementations. So, while
+the original work is _mostly_ my own, with AI mostly being for debugging or asking for
+asking about code optimisation, the current state of the project is heavily altered by AI,
+under my supervision and guidance.
+
+The Iced GUI & Web application was heavily "vibe coded". My primary input was to
+explicitly outline what I wanted, providing feedback throughout. Note that since I have
+moderate experience creating Iced applications, the majority of work supervised was almost
+explicitly instructed.
+
+I have never really let AI build an entire Iced application, preferring to do it myself.
+It is a little bit messy, but it did a relatively decent job—though, I still prefer to do
+it myself!
 
 [video]: https://www.youtube.com/watch?v=AT9wAQSV5_4
