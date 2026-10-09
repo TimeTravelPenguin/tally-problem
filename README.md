@@ -11,7 +11,8 @@ Inspired by [OskarPuzzle's video](https://www.youtube.com/watch?v=AT9wAQSV5_4).
 
 The Iced interface uses Catppuccin Mocha, with validated inputs and a scrollable
 sequence of steps. Hover over an input's help marker for an explanation.
-Leading zeros determine the counter width.
+Leading zeros determine the counter width. Searches run in the background and can
+be cancelled without freezing the interface.
 Use Tab / Shift + Tab to move between controls and Enter to solve; Page Up / Page
 Down scroll the results.
 
@@ -55,6 +56,9 @@ reset index, or view all options:
 cargo run -- 0012 --start 0009 --reset-index 9
 cargo run -- --help
 ```
+
+The exact solver shares digit patterns to reduce search time and memory. There is
+no fixed digit limit, though difficult targets can still take a long time.
 
 ## Library
 

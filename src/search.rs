@@ -1,10 +1,15 @@
 use std::{cmp::Reverse, collections::BinaryHeap};
 
+mod diagram;
+
+use diagram::{Diagram, EMPTY, NodeId, insert, push};
+
+use rustc_hash::FxHashMap as HashMap;
 use thiserror::Error;
 
 use crate::TallyCounter;
 
-/// Invalid search input or a search space that cannot be represented or allocated.
+/// Invalid search input or insufficient storage for the explored patterns.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SearchError {
     #[error("Invalid digit count: {0}. Value should be greater than 0.")]
@@ -13,8 +18,11 @@ pub enum SearchError {
     InvalidTargetLength { expected: usize, actual: usize },
     #[error("Invalid target digit: {0}. Value should be in the range 0-9.")]
     InvalidTargetDigit(u8),
+    /// Retained for compatibility; the symbolic solver has no numeric width limit.
     #[error("Counter length too large: {0}")]
     CounterLengthTooLarge(usize),
+    #[error("The optimal sequence is too long to represent")]
+    CostTooLarge,
     #[error("Unable to allocate memory for the search")]
     AllocationFailed,
 }
@@ -50,17 +58,16 @@ pub enum SearchResult {
 /// The current outcome of a bounded search step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchProgress {
-    /// More work remains. The count includes non-stale states visited so far.
+    /// More work remains. Each visited state group may represent many concrete
+    /// counter states. The field name is retained for API compatibility.
     InProgress {
         visited_states: usize,
     },
     Complete(SearchResult),
 }
 
-/// An incremental solver that can yield between bounded portions of work.
-///
-/// The search has the same objectives and input requirements as [`search`].
-/// It owns its search state, so the initial counter can be changed or dropped.
+/// An exact incremental solver. Search state is owned independently of the
+/// original counter and released on completion or failure.
 #[derive(Debug)]
 pub struct SearchSession {
     state: SessionState,
@@ -68,44 +75,65 @@ pub struct SearchSession {
 
 #[derive(Debug)]
 enum SessionState {
-    Searching(ActiveSearch),
+    Searching(Box<ActiveSearch>),
     Complete(SearchResult),
     Failed(SearchError),
 }
 
 #[derive(Debug)]
 struct ActiveSearch {
-    digit_count: usize,
-    value_states: usize,
-    start: usize,
-    target_value: usize,
-    distance: Vec<Cost>,
-    parent: Vec<usize>,
-    action: Vec<Option<Action>>,
-    queue: BinaryHeap<Reverse<(Cost, usize)>>,
+    initial: TallyCounter,
+    diagram: Diagram,
+    settled: [NodeId; 10],
+    regions: HashMap<(Cost, u8), NodeId>,
+    pending: HashMap<(Cost, u8), NodeId>,
+    queue: BinaryHeap<Reverse<(Cost, u8)>>,
     visited_states: usize,
+    cache_cost: Option<Cost>,
+    collection_threshold: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Cost {
     // Field order is important: derived Ord is lexicographic.
-    increments: usize,
-    reset_ticks: usize,
+    increments: u64,
+    reset_ticks: u64,
 }
 
-const INF: Cost = Cost {
-    increments: usize::MAX,
-    reset_ticks: usize::MAX,
-};
+impl Cost {
+    const ZERO: Self = Self {
+        increments: 0,
+        reset_ticks: 0,
+    };
 
-const NO_PARENT: usize = usize::MAX;
+    fn increment(self) -> Result<Self, SearchError> {
+        Ok(Self {
+            increments: self
+                .increments
+                .checked_add(1)
+                .ok_or(SearchError::CostTooLarge)?,
+            ..self
+        })
+    }
+
+    fn reset(self) -> Result<Self, SearchError> {
+        Ok(Self {
+            reset_ticks: self
+                .reset_ticks
+                .checked_add(1)
+                .ok_or(SearchError::CostTooLarge)?,
+            ..self
+        })
+    }
+}
 
 /// Find a sequence that first minimizes increments, then total reset ticks.
 ///
 /// The final reset index is unconstrained. The target must contain one decimal
-/// digit per counter digit, including leading zeros. Search storage grows as
-/// `10^(digit_count + 1)`; unrepresentable widths and allocation failures are
-/// reported as errors. An already displayed target needs no search allocation.
+/// digit per counter digit, including leading zeros. A symbolic reverse search
+/// shares sets of digit combinations instead of allocating every possible state.
+/// Storage depends on the patterns explored; difficult inputs can still require
+/// exponential work. There is no numeric counter-width limit.
 pub fn search(counter: &TallyCounter, target: &[u8]) -> Result<SearchResult, SearchError> {
     let mut session = SearchSession::new(counter, target)?;
 
@@ -117,9 +145,8 @@ pub fn search(counter: &TallyCounter, target: &[u8]) -> Result<SearchResult, Sea
 }
 
 impl SearchSession {
-    /// Validate the target and allocate the search state.
-    ///
-    /// An already displayed target completes without allocating search buffers.
+    /// Validate the target and prepare its compact search representation.
+    /// An already displayed target completes without search buffers.
     pub fn new(counter: &TallyCounter, target: &[u8]) -> Result<Self, SearchError> {
         let digit_count = counter.values().len();
 
@@ -138,85 +165,73 @@ impl SearchSession {
             return Err(SearchError::InvalidTargetDigit(invalid_digit));
         }
 
-        let exponent = digit_count
-            .try_into()
-            .map_err(|_| SearchError::CounterLengthTooLarge(digit_count))?;
-
-        let value_states = 10usize
-            .checked_pow(exponent)
-            .ok_or(SearchError::CounterLengthTooLarge(digit_count))?;
-
-        let state_count = value_states
-            .checked_mul(10)
-            .ok_or(SearchError::CounterLengthTooLarge(digit_count))?;
-
         if counter.values() == target {
             return Ok(Self {
                 state: SessionState::Complete(SearchResult::Found(Vec::new())),
             });
         }
 
-        let start = encode_state(counter.values(), counter.reset_index());
-        let target_value = encode_values(target);
+        // Resets cannot split an equal pair of wheels. If one increment makes
+        // the target and creates such a boundary, at least one increment is
+        // necessary and this zero-reset sequence is already globally optimal.
+        let mut incremented = counter.clone();
+        incremented.increment();
+        let creates_boundary = counter
+            .values()
+            .windows(2)
+            .zip(target.windows(2))
+            .any(|(initial, target)| initial[0] == initial[1] && target[0] != target[1]);
 
-        let mut distance = filled_buffer(INF, state_count)?;
-        let mut parent = filled_buffer(NO_PARENT, state_count)?;
-        let action = filled_buffer(None, state_count)?;
-        let mut queue = BinaryHeap::new();
+        if incremented.values() == target && creates_boundary {
+            return Ok(Self {
+                state: SessionState::Complete(SearchResult::Found(vec![Action::Increment(1)])),
+            });
+        }
 
-        distance[start] = Cost {
-            increments: 0,
-            reset_ticks: 0,
+        let mut diagram = Diagram::default();
+        let target_root = diagram.singleton(target)?;
+        let mut search = ActiveSearch {
+            initial: counter.clone(),
+            diagram,
+            settled: [EMPTY; 10],
+            regions: HashMap::default(),
+            pending: HashMap::default(),
+            queue: BinaryHeap::new(),
+            visited_states: 0,
+            cache_cost: None,
+            collection_threshold: 32_768,
         };
 
-        parent[start] = start;
-        queue
-            .try_reserve(1)
-            .map_err(|_| SearchError::AllocationFailed)?;
-
-        queue.push(Reverse((distance[start], start)));
+        // Any final reset index is acceptable.
+        for reset in 0..10 {
+            search.enqueue(Cost::ZERO, reset, target_root)?;
+        }
 
         Ok(Self {
-            state: SessionState::Searching(ActiveSearch {
-                digit_count,
-                value_states,
-                start,
-                target_value,
-                distance,
-                parent,
-                action,
-                queue,
-                visited_states: 0,
-            }),
+            state: SessionState::Searching(Box::new(search)),
         })
     }
 
-    /// Pop at most `max_states` queue entries, including stale entries.
+    /// Process at most `max_states` queued state groups, including empty groups.
     ///
-    /// A zero budget observes the current state without doing search work.
-    /// Completion releases the search buffers and subsequent calls return the
-    /// same result. A failed step also retains its error for subsequent calls.
+    /// A group shares digit patterns and may contain many concrete states; its
+    /// processing time varies with its diagram size. Run CPU work on a worker
+    /// thread for a responsive interface. A zero budget only observes progress.
+    /// Completion releases search buffers and subsequent calls retain the result.
     pub fn advance(&mut self, max_states: usize) -> Result<SearchProgress, SearchError> {
         let progress = match &mut self.state {
             SessionState::Searching(search) => search.advance(max_states),
-            SessionState::Complete(result) => {
-                return Ok(SearchProgress::Complete(result.clone()));
-            }
-
+            SessionState::Complete(result) => return Ok(SearchProgress::Complete(result.clone())),
             SessionState::Failed(error) => return Err(error.clone()),
         };
 
         match &progress {
             Ok(SearchProgress::Complete(result)) => {
-                self.state = SessionState::Complete(result.clone());
+                self.state = SessionState::Complete(result.clone())
             }
-
-            Err(error) => {
-                self.state = SessionState::Failed(error.clone());
-            }
-
+            Err(error) => self.state = SessionState::Failed(error.clone()),
             Ok(SearchProgress::InProgress { .. }) => {}
-        };
+        }
 
         progress
     }
@@ -225,185 +240,152 @@ impl SearchSession {
 impl ActiveSearch {
     fn advance(&mut self, max_states: usize) -> Result<SearchProgress, SearchError> {
         for _ in 0..max_states {
-            let Some(Reverse((cost, state))) = self.queue.pop() else {
+            let Some(Reverse((cost, reset))) = self.queue.pop() else {
                 return Ok(SearchProgress::Complete(SearchResult::NotFound));
             };
 
-            // Stale entries consume the budget as well, keeping each step bounded.
-            if cost != self.distance[state] {
+            if self.diagram.node_count() >= self.collection_threshold {
+                self.collect_diagram()?;
+            }
+
+            if self.cache_cost != Some(cost) {
+                self.diagram.clear_caches();
+                self.cache_cost = Some(cost);
+            }
+
+            let root = self.pending.remove(&(cost, reset)).unwrap();
+            let root = self
+                .diagram
+                .difference(root, self.settled[reset as usize])?;
+
+            if root == EMPTY {
                 continue;
             }
 
-            self.visited_states += 1;
+            self.visited_states = self.visited_states.saturating_add(1);
+            insert(&mut self.regions, (cost, reset), root)?;
 
-            let value = state / 10;
-            let reset = state % 10;
-
-            // The first target popped is optimal in both objectives.
-            if value == self.target_value {
-                return Ok(SearchProgress::Complete(SearchResult::Found(reconstruct(
-                    state,
-                    self.start,
-                    &self.parent,
-                    &self.action,
-                )?)));
+            if reset == self.initial.reset_index()
+                && self.diagram.contains(root, self.initial.values())
+            {
+                return Ok(SearchProgress::Complete(SearchResult::Found(
+                    self.reconstruct(cost)?,
+                )));
             }
 
-            let next = reset_forward_one(state, self.digit_count);
+            self.settled[reset as usize] =
+                self.diagram.union(self.settled[reset as usize], root)?;
+            let reset_cost = cost.reset()?;
+            let previous_reset = (reset + 9) % 10;
+            let forward_predecessors = self.diagram.reset_preimage(root, previous_reset)?;
+            self.enqueue(reset_cost, previous_reset, forward_predecessors)?;
+            self.enqueue(reset_cost, (reset + 1) % 10, root)?;
 
-            relax(
-                state,
-                next,
-                Action::ResetForward(1),
-                Cost {
-                    increments: cost.increments,
-                    reset_ticks: cost.reset_ticks + 1,
-                },
-                &mut self.distance,
-                &mut self.parent,
-                &mut self.action,
-                &mut self.queue,
-            )?;
-
-            let next_reset = (reset + 9) % 10;
-            let next = value * 10 + next_reset;
-
-            relax(
-                state,
-                next,
-                Action::ResetBackward(1),
-                Cost {
-                    increments: cost.increments,
-                    reset_ticks: cost.reset_ticks + 1,
-                },
-                &mut self.distance,
-                &mut self.parent,
-                &mut self.action,
-                &mut self.queue,
-            )?;
-
-            let next_value = if value + 1 == self.value_states {
-                0
-            } else {
-                value + 1
-            };
-
-            let next = next_value * 10 + reset;
-
-            relax(
-                state,
-                next,
-                Action::Increment(1),
-                Cost {
-                    increments: cost.increments + 1,
-                    reset_ticks: cost.reset_ticks,
-                },
-                &mut self.distance,
-                &mut self.parent,
-                &mut self.action,
-                &mut self.queue,
-            )?;
-        }
-
-        if self.queue.is_empty() {
-            return Ok(SearchProgress::Complete(SearchResult::NotFound));
+            let increment_predecessors = self.diagram.increment_preimage(root)?;
+            self.enqueue(cost.increment()?, reset, increment_predecessors)?;
         }
 
         Ok(SearchProgress::InProgress {
             visited_states: self.visited_states,
         })
     }
-}
 
-fn filled_buffer<T: Clone>(value: T, len: usize) -> Result<Vec<T>, SearchError> {
-    let mut buffer = Vec::new();
-    buffer
-        .try_reserve_exact(len)
-        .map_err(|_| SearchError::AllocationFailed)?;
+    fn collect_diagram(&mut self) -> Result<(), SearchError> {
+        let roots = self
+            .settled
+            .iter()
+            .chain(self.regions.values())
+            .chain(self.pending.values())
+            .copied();
+        let mapping = self.diagram.collect(roots)?;
 
-    buffer.resize(len, value);
-
-    Ok(buffer)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn relax(
-    current: usize,
-    next: usize,
-    next_action: Action,
-    next_cost: Cost,
-    distance: &mut [Cost],
-    parent: &mut [usize],
-    action: &mut [Option<Action>],
-    queue: &mut BinaryHeap<Reverse<(Cost, usize)>>,
-) -> Result<(), SearchError> {
-    if next_cost >= distance[next] {
-        return Ok(());
-    }
-
-    queue
-        .try_reserve(1)
-        .map_err(|_| SearchError::AllocationFailed)?;
-
-    distance[next] = next_cost;
-    parent[next] = current;
-    action[next] = Some(next_action);
-    queue.push(Reverse((next_cost, next)));
-
-    Ok(())
-}
-
-fn encode_values(values: &[u8]) -> usize {
-    values
-        .iter()
-        .fold(0usize, |acc, &digit| acc * 10 + digit as usize)
-}
-
-fn encode_state(values: &[u8], reset_index: u8) -> usize {
-    encode_values(values) * 10 + reset_index as usize
-}
-
-fn reset_forward_one(state: usize, digit_count: usize) -> usize {
-    let value = state / 10;
-    let reset = (state % 10) as u8;
-    let next_reset = (reset + 1) % 10;
-
-    let mut next_value = value;
-    let mut place = 1usize;
-
-    for _ in 0..digit_count {
-        let digit = ((value / place) % 10) as u8;
-
-        if digit == reset {
-            if reset == 9 {
-                next_value -= 9 * place;
-            } else {
-                next_value += place;
-            }
+        for root in self
+            .settled
+            .iter_mut()
+            .chain(self.regions.values_mut())
+            .chain(self.pending.values_mut())
+        {
+            *root = mapping[*root as usize];
         }
 
-        place *= 10;
+        self.collection_threshold = self.diagram.node_count().saturating_mul(3).max(32_768);
+
+        Ok(())
     }
 
-    next_value * 10 + next_reset as usize
-}
+    fn enqueue(&mut self, cost: Cost, reset: u8, root: NodeId) -> Result<(), SearchError> {
+        if root == EMPTY {
+            return Ok(());
+        }
 
-fn reconstruct(
-    mut state: usize,
-    start: usize,
-    parent: &[usize],
-    action: &[Option<Action>],
-) -> Result<Vec<Action>, SearchError> {
-    let mut result = Vec::new();
+        let key = (cost, reset);
 
-    while state != start {
-        combine_action(&mut result, action[state].unwrap())?;
-        state = parent[state];
+        if let Some(&previous) = self.pending.get(&key) {
+            let merged = self.diagram.union(previous, root)?;
+            self.pending.insert(key, merged);
+        } else {
+            self.queue
+                .try_reserve(1)
+                .map_err(|_| SearchError::AllocationFailed)?;
+            insert(&mut self.pending, key, root)?;
+            self.queue.push(Reverse(key));
+        }
+
+        Ok(())
     }
 
-    result.reverse();
+    fn reconstruct(&self, mut cost: Cost) -> Result<Vec<Action>, SearchError> {
+        let mut counter = self.initial.clone();
+        let mut result = Vec::new();
 
-    Ok(result)
+        while cost != Cost::ZERO {
+            let mut selected = None;
+
+            if cost.increments > 0 {
+                let remaining = Cost {
+                    increments: cost.increments - 1,
+                    ..cost
+                };
+                let mut next = counter.clone();
+                next.increment();
+
+                if self.includes(remaining, &next) {
+                    selected = Some((Action::Increment(1), remaining, next));
+                }
+            }
+
+            if selected.is_none() && cost.reset_ticks > 0 {
+                let remaining = Cost {
+                    reset_ticks: cost.reset_ticks - 1,
+                    ..cost
+                };
+
+                for action in [Action::ResetForward(1), Action::ResetBackward(1)] {
+                    let mut next = counter.clone();
+                    action.apply(&mut next);
+
+                    if self.includes(remaining, &next) {
+                        selected = Some((action, remaining, next));
+                        break;
+                    }
+                }
+            }
+
+            let (action, remaining, next) =
+                selected.expect("An optimal region has an optimal successor");
+            combine_action(&mut result, action)?;
+            cost = remaining;
+            counter = next;
+        }
+
+        Ok(result)
+    }
+
+    fn includes(&self, cost: Cost, counter: &TallyCounter) -> bool {
+        self.regions
+            .get(&(cost, counter.reset_index()))
+            .is_some_and(|&root| self.diagram.contains(root, counter.values()))
+    }
 }
 
 fn combine_action(result: &mut Vec<Action>, action: Action) -> Result<(), SearchError> {
@@ -411,16 +393,10 @@ fn combine_action(result: &mut Vec<Action>, action: Action) -> Result<(), Search
         (Some(Action::Increment(total)), Action::Increment(ticks))
         | (Some(Action::ResetForward(total)), Action::ResetForward(ticks))
         | (Some(Action::ResetBackward(total)), Action::ResetBackward(ticks)) => {
-            *total += ticks;
+            *total = total.checked_add(ticks).ok_or(SearchError::CostTooLarge)?;
         }
 
-        (_, action) => {
-            result
-                .try_reserve(1)
-                .map_err(|_| SearchError::AllocationFailed)?;
-
-            result.push(action);
-        }
+        (_, action) => push(result, action)?,
     }
 
     Ok(())
@@ -520,35 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_queue_entries_consume_the_session_budget() {
-        let mut counter = TallyCounter::new(2).unwrap();
-        counter.set_values(vec![5, 0]).unwrap();
-
-        let mut session = SearchSession::new(&counter, &[5, 1]).unwrap();
-        let SessionState::Searching(search) = &mut session.state else {
-            panic!("An unmatched target needs a search");
-        };
-
-        // This entry sorts before the start but no longer matches its distance.
-        search.queue.push(Reverse((
-            Cost {
-                increments: 0,
-                reset_ticks: 0,
-            },
-            0,
-        )));
-
-        assert_eq!(
-            session.advance(1),
-            Ok(SearchProgress::InProgress { visited_states: 0 })
-        );
-        assert_eq!(
-            session.advance(1),
-            Ok(SearchProgress::InProgress { visited_states: 1 })
-        );
-    }
-
-    #[test]
     fn bounded_sessions_preserve_the_full_search_result() {
         for (values, reset_index, target) in [
             (vec![0, 0], 0, vec![9, 8]),
@@ -633,18 +580,62 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_and_unallocatable_searches_return_errors() {
-        let oversized_width = usize::BITS as usize;
-        let counter = TallyCounter::new(oversized_width).unwrap();
+    fn wide_counters_do_not_need_numeric_encoding_or_recursive_traversal() {
+        let mut counter = TallyCounter::new(1_000).unwrap();
+        counter.set_reset_index(7).unwrap();
+        let mut target = vec![0; 1_000];
+        target[999] = 1;
 
+        assert_eq!(found_actions(&counter, &target), vec![Action::Increment(1)]);
         assert_eq!(
-            search(&counter, &vec![0; oversized_width]),
-            Err(SearchError::CounterLengthTooLarge(oversized_width))
+            search(&counter, &vec![0; 1_000]),
+            Ok(SearchResult::Found(Vec::new()))
         );
-        assert_eq!(
-            filled_buffer(INF, usize::MAX),
-            Err(SearchError::AllocationFailed)
-        );
+    }
+
+    #[test]
+    fn compaction_preserves_exact_costs_and_replay() {
+        let initial = TallyCounter::new(4).unwrap();
+        let target = [9, 8, 7, 6];
+        let mut session = SearchSession::new(&initial, &target).unwrap();
+        let actions = loop {
+            // Force frequent collection while an unfinished frontier and all
+            // reconstruction regions are still retained.
+            if let SessionState::Searching(search) = &mut session.state {
+                search.collection_threshold = 0;
+            }
+
+            if let SearchProgress::Complete(SearchResult::Found(actions)) =
+                session.advance(64).unwrap()
+            {
+                break actions;
+            }
+        };
+
+        assert_eq!(action_cost(&actions), (6, 148));
+        let mut replay = initial;
+
+        for action in actions {
+            action.apply(&mut replay);
+        }
+
+        assert_eq!(replay.values(), target);
+        assert!(matches!(session.state, SessionState::Complete(_)));
+    }
+
+    #[test]
+    fn five_digit_search_preserves_the_independent_optimum() {
+        let mut counter = TallyCounter::new(5).unwrap();
+        let target = [9, 8, 7, 6, 5];
+        let actions = found_actions(&counter, &target);
+
+        assert_eq!(action_cost(&actions), (11, 267));
+
+        for action in actions {
+            action.apply(&mut counter);
+        }
+
+        assert_eq!(counter.values(), target);
     }
 
     #[test]

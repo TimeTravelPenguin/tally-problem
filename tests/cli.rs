@@ -216,8 +216,9 @@ fn out_of_range_reset_position_is_rejected() {
 }
 
 #[test]
-fn oversized_search_fails_with_an_error() {
-    let stderr = error_output(&["1000000000000000000000000000000000000000"]);
+fn wide_counters_are_supported_without_numeric_encoding() {
+    let output = successful_output(&["0000000000000000000000000000000000000001"]);
 
-    assert!(stderr.to_lowercase().contains("too large"));
+    assert!(output.contains("Minimum increments: 1"));
+    assert!(output.contains("Reset ticks: 0"));
 }
