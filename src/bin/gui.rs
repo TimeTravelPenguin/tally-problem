@@ -4,6 +4,8 @@ mod app;
 mod focus;
 #[path = "../gui/model.rs"]
 mod model;
+#[path = "../gui/solver.rs"]
+mod solver;
 
 fn main() -> iced::Result {
     iced::application(app::Planner::new, app::Planner::update, app::Planner::view)

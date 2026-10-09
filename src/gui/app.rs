@@ -1,18 +1,16 @@
-use std::sync::{Arc, Mutex};
-
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::{
     button, column, container, operation, responsive, row, scrollable, space, text, text_input,
     tooltip,
 };
 use iced::{Border, Color, Element, Event, Fill, Subscription, Task, Theme, event, mouse};
-use tally_problem::{Action, SearchError, SearchProgress, SearchSession};
+use tally_problem::{Action, SearchProgress};
 
 use crate::focus;
 use crate::model::{Form, PreparedSearch, Solution, Step};
+use crate::solver;
 
 const PAGE: &str = "planner-page";
-const SEARCH_BATCH: usize = 1_024;
 const VIDEO_URL: &str = "https://www.youtube.com/watch?v=AT9wAQSV5_4";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +72,7 @@ impl Focus {
 }
 
 struct Job {
-    session: Arc<Mutex<SearchSession>>,
+    _control: solver::Control,
     prepared: PreparedSearch,
 }
 
@@ -99,7 +97,7 @@ pub enum Message {
     SolvePressed,
     ResetForm,
     OpenVideo,
-    Progress(u64, Result<SearchProgress, SearchError>),
+    Progress(u64, Result<SearchProgress, String>),
     KeyPressed(Key, keyboard::Modifiers),
     PointerPressed,
     InputFocused(u64, &'static str, bool),
@@ -205,10 +203,6 @@ impl Planner {
                 match progress {
                     Ok(SearchProgress::InProgress { visited_states }) => {
                         self.visited_states = visited_states;
-
-                        if let Some(job) = &self.job {
-                            return search_task(Arc::clone(&job.session), generation);
-                        }
                     }
 
                     Ok(SearchProgress::Complete(result)) => {
@@ -222,7 +216,7 @@ impl Planner {
 
                     Err(error) => {
                         self.job = None;
-                        self.error = Some(error.to_string());
+                        self.error = Some(error);
                     }
                 }
             }
@@ -308,21 +302,16 @@ impl Planner {
         self.solution = None;
         self.error = None;
 
-        let session = match SearchSession::new(&prepared.counter, &prepared.target) {
-            Ok(session) => Arc::new(Mutex::new(session)),
-            Err(error) => {
-                self.error = Some(error.to_string());
-
-                return Task::none();
-            }
-        };
+        let (control, task) = solver::start(prepared.counter.clone(), prepared.target.clone());
 
         self.job = Some(Job {
-            session: Arc::clone(&session),
+            _control: control,
             prepared,
         });
 
-        search_task(session, self.generation)
+        let generation = self.generation;
+
+        task.map(move |progress| Message::Progress(generation, progress))
     }
 
     fn focus(&mut self, focus: Focus) -> Task<Message> {
@@ -471,7 +460,7 @@ impl Planner {
             } else if self.job.is_some() {
                 card(column![
                     text("Looking for the best path…").size(22),
-                    text(format!("{} states explored", self.visited_states)).style(text::secondary),
+                    text(format!("{} state groups explored", self.visited_states)).style(text::secondary),
                     text("You can cancel or change an input at any time.").size(13).style(text::secondary),
                 ].spacing(12), false)
             } else {
@@ -582,22 +571,6 @@ impl Planner {
         .spacing(20)
         .into()
     }
-}
-
-fn search_task(session: Arc<Mutex<SearchSession>>, generation: u64) -> Task<Message> {
-    Task::perform(
-        async move {
-            // An async function alone cannot yield CPU work on a browser's main thread.
-            #[cfg(target_arch = "wasm32")]
-            gloo_timers::future::TimeoutFuture::new(0).await;
-
-            session
-                .lock()
-                .map_err(|_| SearchError::AllocationFailed)?
-                .advance(SEARCH_BATCH)
-        },
-        move |progress| Message::Progress(generation, progress),
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
