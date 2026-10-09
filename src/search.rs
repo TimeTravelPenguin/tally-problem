@@ -1,5 +1,6 @@
 use std::{cmp::Reverse, collections::BinaryHeap};
 
+mod bounds;
 mod diagram;
 
 use diagram::{Diagram, EMPTY, NodeId, insert, push};
@@ -75,7 +76,7 @@ pub enum SearchProgress {
 pub struct SearchStatistics {
     /// Nonempty state groups explored, matching `SearchProgress::visited_states`.
     pub visited_groups: usize,
-    /// Increment cost of the latest queued group processed.
+    /// Increment cost of the latest group, including any skipped forced tail.
     pub increment_layer: u64,
     /// Reset cost within the latest increment layer; can decrease at a new layer.
     pub reset_ticks: u64,
@@ -113,6 +114,8 @@ struct ActiveSearch {
     visited_states: usize,
     cache_cost: Option<Cost>,
     collection_threshold: usize,
+    forced_increments: u64,
+    cost_exceeded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -166,26 +169,84 @@ pub fn search(counter: &TallyCounter, target: &[u8]) -> Result<SearchResult, Sea
     }
 }
 
+/// A guaranteed lower bound on the increments needed to reach `target`.
+///
+/// Computes a weighted score of disjoint unequal neighboring wheels in linear
+/// time. Resets cannot increase this score and one increment increases it by at
+/// most one. For targets containing all ten digits, adds their mandatory final
+/// increment stretch to the score bound for its predecessor.
+///
+/// The bound can be smaller than the optimum. It measures solution cost, not
+/// state groups, percentage completion, or remaining time. The reset index does
+/// not affect it. Digits include leading zeros and have no fixed width limit.
+///
+/// # Errors
+///
+/// Returns the same target validation errors as [`search()`], or
+/// [`SearchError::CostTooLarge`] if the guaranteed minimum cannot fit `u64`.
+/// Predecessor storage can also return [`SearchError::AllocationFailed`].
+///
+/// ```
+/// use tally_problem::{TallyCounter, increment_lower_bound};
+/// let counter = TallyCounter::new(4)?;
+/// assert_eq!(increment_lower_bound(&counter, &[9, 8, 7, 6])?, 4);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn increment_lower_bound(counter: &TallyCounter, target: &[u8]) -> Result<u64, SearchError> {
+    validate_target(counter, target)?;
+    let initial = counter.values();
+
+    if let Some(predecessor) = bounds::forced_predecessor(target)? {
+        if initial >= predecessor.as_slice() && initial <= target {
+            return bounds::decimal_difference(target, initial);
+        }
+
+        let tail = bounds::decimal_difference(target, &predecessor)?;
+        let prefix_bound =
+            bounds::boundary_score(&predecessor).saturating_sub(bounds::boundary_score(initial));
+
+        return u64::try_from(u128::from(tail) + prefix_bound)
+            .map_err(|_| SearchError::CostTooLarge);
+    }
+
+    u64::try_from(bounds::boundary_score(target).saturating_sub(bounds::boundary_score(initial)))
+        .map_err(|_| SearchError::CostTooLarge)
+}
+
+/// Check the fixed-width decimal target contract shared by search and bounds.
+fn validate_target(counter: &TallyCounter, target: &[u8]) -> Result<(), SearchError> {
+    let digit_count = counter.digit_count();
+
+    if digit_count == 0 {
+        return Err(SearchError::InvalidDigitCount(digit_count));
+    }
+
+    if target.len() != digit_count {
+        return Err(SearchError::InvalidTargetLength {
+            expected: digit_count,
+            actual: target.len(),
+        });
+    }
+
+    if let Some(&invalid_digit) = target.iter().find(|&&digit| digit > 9) {
+        return Err(SearchError::InvalidTargetDigit(invalid_digit));
+    }
+
+    Ok(())
+}
+
 impl SearchSession {
     /// Validate the target and prepare its compact search representation.
-    /// An already displayed target completes without search buffers.
+    ///
+    /// An already displayed target or a provably optimal direct increment path
+    /// completes without search buffers. All-digit targets are reduced to their
+    /// forced-tail predecessor before constructing the reverse frontier.
+    ///
+    /// # Errors
+    ///
+    /// Returns target validation, forced-tail cost overflow, or allocation errors.
     pub fn new(counter: &TallyCounter, target: &[u8]) -> Result<Self, SearchError> {
-        let digit_count = counter.values().len();
-
-        if digit_count == 0 {
-            return Err(SearchError::InvalidDigitCount(digit_count));
-        }
-
-        if target.len() != digit_count {
-            return Err(SearchError::InvalidTargetLength {
-                expected: digit_count,
-                actual: target.len(),
-            });
-        }
-
-        if let Some(&invalid_digit) = target.iter().find(|&&digit| digit > 9) {
-            return Err(SearchError::InvalidTargetDigit(invalid_digit));
-        }
+        validate_target(counter, target)?;
 
         if counter.values() == target {
             return Ok(Self {
@@ -193,6 +254,29 @@ impl SearchSession {
                 statistics: SearchStatistics::default(),
             });
         }
+
+        let predecessor = bounds::forced_predecessor(target)?;
+        let forced_increments = if let Some(predecessor) = &predecessor {
+            if counter.values() >= predecessor.as_slice() && counter.values() <= target {
+                let increments = bounds::decimal_difference(target, counter.values())?;
+
+                return Ok(Self {
+                    state: SessionState::Complete(SearchResult::Found(vec![Action::Increment(
+                        increments,
+                    )])),
+                    statistics: SearchStatistics {
+                        increment_layer: increments,
+                        ..SearchStatistics::default()
+                    },
+                });
+            }
+
+            bounds::decimal_difference(target, predecessor)?
+        } else {
+            0
+        };
+
+        let target = predecessor.as_deref().unwrap_or(target);
 
         // Resets cannot split an equal pair of wheels. If one increment makes
         // the target and creates such a boundary, at least one increment is
@@ -206,9 +290,18 @@ impl SearchSession {
             .any(|(initial, target)| initial[0] == initial[1] && target[0] != target[1]);
 
         if incremented.values() == target && creates_boundary {
+            let increments = forced_increments
+                .checked_add(1)
+                .ok_or(SearchError::CostTooLarge)?;
+
             return Ok(Self {
-                state: SessionState::Complete(SearchResult::Found(vec![Action::Increment(1)])),
-                statistics: SearchStatistics::default(),
+                state: SessionState::Complete(SearchResult::Found(vec![Action::Increment(
+                    increments,
+                )])),
+                statistics: SearchStatistics {
+                    increment_layer: increments,
+                    ..SearchStatistics::default()
+                },
             });
         }
 
@@ -224,6 +317,8 @@ impl SearchSession {
             visited_states: 0,
             cache_cost: None,
             collection_threshold: 32_768,
+            forced_increments,
+            cost_exceeded: false,
         };
 
         // Any final reset index is acceptable.
@@ -282,7 +377,7 @@ impl ActiveSearch {
 
         SearchStatistics {
             visited_groups: self.visited_states,
-            increment_layer: cost.increments,
+            increment_layer: cost.increments + self.forced_increments,
             reset_ticks: cost.reset_ticks,
             diagram_nodes: self.diagram.node_count(),
             diagram_work: self.diagram.work(),
@@ -293,6 +388,10 @@ impl ActiveSearch {
     fn advance(&mut self, max_states: usize) -> Result<SearchProgress, SearchError> {
         for _ in 0..max_states {
             let Some(Reverse((cost, reset))) = self.queue.pop() else {
+                if self.cost_exceeded {
+                    return Err(SearchError::CostTooLarge);
+                }
+
                 return Ok(SearchProgress::Complete(SearchResult::NotFound));
             };
 
@@ -334,7 +433,12 @@ impl ActiveSearch {
             self.enqueue(reset_cost, (reset + 1) % 10, root)?;
 
             let increment_predecessors = self.diagram.increment_preimage(root)?;
-            self.enqueue(cost.increment()?, reset, increment_predecessors)?;
+
+            if let Ok(increment_cost) = cost.increment() {
+                self.enqueue(increment_cost, reset, increment_predecessors)?;
+            } else {
+                self.cost_exceeded = true;
+            }
         }
 
         Ok(SearchProgress::InProgress {
@@ -367,6 +471,15 @@ impl ActiveSearch {
 
     fn enqueue(&mut self, cost: Cost, reset: u8, root: NodeId) -> Result<(), SearchError> {
         if root == EMPTY {
+            return Ok(());
+        }
+
+        if cost
+            .increments
+            .checked_add(self.forced_increments)
+            .is_none()
+        {
+            self.cost_exceeded = true;
             return Ok(());
         }
 
@@ -428,6 +541,10 @@ impl ActiveSearch {
             combine_action(&mut result, action)?;
             cost = remaining;
             counter = next;
+        }
+
+        if self.forced_increments > 0 {
+            combine_action(&mut result, Action::Increment(self.forced_increments))?;
         }
 
         Ok(result)
@@ -496,6 +613,171 @@ mod tests {
             search(&counter, &[0, 10]),
             Err(SearchError::InvalidTargetDigit(10))
         );
+        assert_eq!(
+            increment_lower_bound(&counter, &[1]),
+            Err(SearchError::InvalidTargetLength {
+                expected: 2,
+                actual: 1
+            })
+        );
+        assert_eq!(
+            increment_lower_bound(&counter, &[0, 10]),
+            Err(SearchError::InvalidTargetDigit(10))
+        );
+    }
+
+    #[test]
+    fn lower_bounds_include_forced_tails_and_respect_arbitrary_starts() {
+        let initial = TallyCounter::new(4).unwrap();
+        assert_eq!(increment_lower_bound(&initial, &[1, 0, 0, 0]), Ok(3));
+        assert_eq!(increment_lower_bound(&initial, &[0, 1, 0, 1]), Ok(4));
+        assert_eq!(increment_lower_bound(&initial, &[9, 8, 7, 6]), Ok(4));
+
+        let mut initial = TallyCounter::new(12).unwrap();
+        let target = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9];
+        assert_eq!(increment_lower_bound(&initial, &target), Ok(143));
+        initial
+            .set_values(vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 8])
+            .unwrap();
+        assert_eq!(increment_lower_bound(&initial, &target), Ok(1));
+        assert_eq!(
+            search(&initial, &target),
+            Ok(SearchResult::Found(vec![Action::Increment(1)]))
+        );
+    }
+
+    #[test]
+    fn forced_tail_shortcuts_and_reduced_search_preserve_costs_and_replay() {
+        let target = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9];
+
+        for (values, reset_index, expected) in [
+            (
+                vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 8],
+                7,
+                vec![Action::Increment(111)],
+            ),
+            (
+                vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 7],
+                0,
+                vec![Action::Increment(112)],
+            ),
+            (
+                vec![9, 1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 8],
+                9,
+                vec![Action::ResetForward(1), Action::Increment(111)],
+            ),
+        ] {
+            let mut initial = TallyCounter::new(values.len()).unwrap();
+            initial.set_values(values).unwrap();
+            initial.set_reset_index(reset_index).unwrap();
+            let mut session = SearchSession::new(&initial, &target).unwrap();
+            let actions = loop {
+                if let SearchProgress::Complete(SearchResult::Found(actions)) =
+                    session.advance(1).unwrap()
+                {
+                    break actions;
+                }
+            };
+
+            assert_eq!(actions, expected);
+            assert_eq!(
+                session.statistics().increment_layer,
+                action_cost(&actions).0 as u64
+            );
+
+            for action in actions {
+                action.apply(&mut initial);
+            }
+
+            assert_eq!(initial.values(), target);
+        }
+    }
+
+    #[test]
+    fn enormous_forced_tails_finish_without_enumeration_and_detect_overflow() {
+        let target: Vec<_> = "01234567899999999999999999999"
+            .bytes()
+            .map(|digit| digit - b'0')
+            .collect();
+        let mut initial = TallyCounter::new(target.len()).unwrap();
+        initial
+            .set_values(
+                "91234567888888888888888888888"
+                    .bytes()
+                    .map(|digit| digit - b'0')
+                    .collect(),
+            )
+            .unwrap();
+        initial.set_reset_index(9).unwrap();
+        let expected = vec![
+            Action::ResetForward(1),
+            Action::Increment(11_111_111_111_111_111_111),
+        ];
+        assert_eq!(found_actions(&initial, &target), expected);
+
+        for action in expected {
+            action.apply(&mut initial);
+        }
+
+        assert_eq!(initial.values(), target);
+
+        let target: Vec<_> = "012345678999999999999999999999"
+            .bytes()
+            .map(|digit| digit - b'0')
+            .collect();
+        let mut initial = TallyCounter::new(target.len()).unwrap();
+        initial
+            .set_values(
+                "012345678888888888888888888888"
+                    .bytes()
+                    .map(|digit| digit - b'0')
+                    .collect(),
+            )
+            .unwrap();
+        assert_eq!(
+            SearchSession::new(&initial, &target).unwrap_err(),
+            SearchError::CostTooLarge
+        );
+        assert_eq!(
+            increment_lower_bound(&initial, &target),
+            Err(SearchError::CostTooLarge)
+        );
+
+        let mut adjacent = target.clone();
+        *adjacent.last_mut().unwrap() = 8;
+        initial.set_values(adjacent).unwrap();
+        assert_eq!(found_actions(&initial, &target), vec![Action::Increment(1)]);
+    }
+
+    #[test]
+    fn overflow_pruning_preserves_representable_zero_increment_prefixes() {
+        let target: Vec<_> = "012345678907335632962598440503"
+            .bytes()
+            .map(|digit| digit - b'0')
+            .collect();
+        let mut initial = TallyCounter::new(target.len()).unwrap();
+        initial
+            .set_values(
+                "912345678888888888888888888888"
+                    .bytes()
+                    .map(|digit| digit - b'0')
+                    .collect(),
+            )
+            .unwrap();
+        initial.set_reset_index(9).unwrap();
+        let actions = found_actions(&initial, &target);
+        assert_eq!(
+            actions,
+            vec![Action::ResetForward(1), Action::Increment(u64::MAX)]
+        );
+
+        for action in actions {
+            action.apply(&mut initial);
+        }
+
+        assert_eq!(initial.values(), target);
+        initial.hard_reset();
+        assert_eq!(search(&initial, &target), Err(SearchError::CostTooLarge));
     }
 
     #[test]
@@ -829,6 +1111,7 @@ mod tests {
                     .unwrap();
 
                 assert_eq!(action_cost(&actions), expected, "Target {target:?}");
+                assert!(increment_lower_bound(&initial, &target).unwrap() <= expected.0 as u64);
 
                 let mut counter = initial.clone();
 
