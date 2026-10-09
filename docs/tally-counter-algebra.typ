@@ -156,7 +156,7 @@ A forward knob tick at index $d$ replaces *every* occurrence of $d$ by
 $(d+1) mod 10$, and moves the knob index to that successor. We denote its
 display effect by $R_d$:
 
-$ R_d(x)_i = cases((d+1) mod 10 & "if " x_i=d, x_i & "otherwise"). $
+$ [R_(d)(x)]_i = cases((d+1) mod 10 & "if " x_i=d, x_i & "otherwise"). $
 
 A backward tick changes only the knob index. It does not move any displayed
 wheel. By turning backward, we can position the knob at any chosen $d$ without
@@ -339,7 +339,7 @@ $ A_d=I_(10)+e_d (e_(sigma(d))-e_d)^T. $
 Every row of $A_d$ is the corresponding identity row, except row $d$, which
 selects the successor digit. Right multiplication therefore gives exactly
 
-$ X(R_d(x))=X(x)A_d. $
+$ X(R_(d)(x))=X(x)A_d. $
 
 Writing $X_d$ for column $d$, this means
 
@@ -719,7 +719,7 @@ Consequently, any path with $k$ increments satisfies
 
 $
   B(t) <= B(s)+k, quad
-  h_B(s,t)=max(0, B(t)-B(s)) <= c(s,t).
+  h_(B)(s,t)=max(0, B(t)-B(s)) <= c(s,t).
 $
 
 This is an *admissible* lower bound: it never overestimates the minimum. It
@@ -737,12 +737,12 @@ holds for arbitrary starts, not only zero. From any uniform start, $B(s)=0$.
 
 == Consistency for search
 
-For a fixed target, the heuristic $h_B(x,t)$ satisfies
-$h_B(x,t) <= w(a)+h_B(a(x),t)$ for each action $a$, where $w(a)$ is one for
+For a fixed target, the heuristic $h_(B)(x,t)$ satisfies
+$h_(B)(x,t) <= w(a)+h_(B)(a(x),t)$ for each action $a$, where $w(a)$ is one for
 an increment and zero for a knob move. This follows directly from the potential
 inequalities. Such a heuristic is called *consistent*.
 
-In reverse search toward a fixed initial display $s$, use $h_B(s,x)$ instead.
+In reverse search toward a fixed initial display $s$, use $h_(B)(s,x)$ instead.
 The same inequality holds on reverse edges. Consistency is useful because the
 estimated total increment cost does not decrease along a concrete search path.
 It does not by itself justify treating a whole group of different displays as
@@ -764,8 +764,8 @@ They do not provide an alternative predecessor value.
 
 For target value $T$, let
 
-$ U=max {v:0<=v<=T, "Missing"("digits"_n(v))}, $
-$ u="digits"_n(U), quad H(t)=T-U. $
+$ U=max {v:0<=v<=T, "Missing"("digits"_(n)(v))}, $
+$ u="digits"_(n)(U), quad H(t)=T-U. $
 
 Here “Missing” means that at least one decimal digit is absent, counting
 leading zeros. The set always contains zero. If the target is already missing a digit, then
@@ -845,7 +845,7 @@ Substitute a lower bound for $c(s,u)$ in the exact decomposition:
 $ h(s,t)=min(D, H(t)+max(0, B(u)-B(s))) <= c(s,t). $
 
 If the target lacks a digit, $H=0$ and this reduces to the boundary bound:
-$h_B(s,t)<=D$ because direct increments are a legal path.
+$h_(B)(s,t)<=D$ because direct increments are a legal path.
 
 For the twelve-wheel example, $B(0^12)=0$ and $B("012345678888")=32$.
 The available boundary weights for this predecessor are $11,10,dots,4$;
