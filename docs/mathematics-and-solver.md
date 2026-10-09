@@ -2,7 +2,7 @@
 
 > [!IMPORTANT]
 > Please note that this document is an in-depth summary of the work I put into optimising
-> this task. It was written my GPT 6.1 Sol.
+> this task. It was written by GPT 6.1 Sol.
 >
 > While experimenting, I was continuously bouncing ideas off AI and having it look into
 > verifying claims while I worked. The results of this document are what followed.
