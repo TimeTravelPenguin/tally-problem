@@ -1,5 +1,12 @@
 # The Tally Puzzle: Mathematics, Bounds, Search, and Progress
 
+> [!IMPORTANT]
+> Please note that this document is an in-depth summary of the work I put into optimising
+> this task. It was written my GPT 6.1 Sol.
+>
+> While experimenting, I was continuously bouncing ideas off AI and having it look into
+> verifying claims while I worked. The results of this document are what followed.
+
 This document defines the puzzle implemented by Tally Puzzle Optimizer, proves
 the bounds used by the application, and explains its exact solver and progress
 estimates. The mechanical inspiration is [OskarPuzzle's video][video]. The rules
