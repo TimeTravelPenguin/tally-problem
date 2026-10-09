@@ -1,3 +1,12 @@
+/**
+ * Browser editing for the three Iced form fields. Rust supplies model values and
+ * root-scrollable geometry; persistent DOM nodes own text, selection, composition,
+ * and mobile keyboard activation. Render reconciliation hides culled fields and
+ * canvas popup overlap without discarding the active editor or caret.
+ *
+ * This bridge deliberately follows the app's fixed field IDs and Mocha theme.
+ */
+
 const fieldIds = ["target-input", "start-input", "reset-input"];
 const fields = new Map();
 const earlyEvents = [];
@@ -14,16 +23,22 @@ function emit(kind, id = "", value = "", key = "", modifiers = 0) {
     }
 }
 
+/** Attach Rust's event callback, delivering any earlier focus/edit events in order. */
 export function setEventSink(sink) {
     eventSink = sink;
     for (const event of earlyEvents.splice(0)) sink(...event);
 }
 
+/** Return the active native field ID, or an empty string for canvas/other focus. */
 export function activeField() {
     const id = document.activeElement?.id;
     return fields.has(id) ? id : "";
 }
 
+/**
+ * Apply a reset synchronously, removing pre-reset edit acknowledgements.
+ * @param {string[]} values Target, starting value, and reset-index text, in that order.
+ */
 export function resetPending(values) {
     requestedFocus = null;
     earlyEvents.length = 0;
@@ -37,6 +52,7 @@ export function resetPending(values) {
     }
 }
 
+/** Begin a canvas frame; only fields visited again by syncField may remain visible. */
 export function beginFrame() {
     for (const field of fields.values()) {
         field.rendered = false;
@@ -44,12 +60,17 @@ export function beginFrame() {
     }
 }
 
+/** Hide editors that Iced culled, keeping their nodes and focus for later reveal. */
 export function endFrame() {
     for (const field of fields.values()) {
         if (!field.rendered) positionField(field);
     }
 }
 
+/**
+ * Hide editors intersecting a painted Iced popup until the next normal frame.
+ * Coordinates share the logical window space of the supplied field geometry.
+ */
 export function occludeFields(x, y, width, height) {
     for (const field of fields.values()) {
         if (!field.rendered || !field.geometry) continue;
@@ -62,6 +83,10 @@ export function occludeFields(x, y, width, height) {
     }
 }
 
+/**
+ * Focus visible editors immediately so trusted taps/Tab retain mobile activation.
+ * Other IDs focus the canvas; offscreen field IDs wait until their next visible draw.
+ */
 export function focus(id) {
     requestedFocus = fieldIds.includes(id) ? id : null;
     const field = fields.get(id);
@@ -73,6 +98,7 @@ export function focus(id) {
     }
 }
 
+/** Send whole text before submitting, retaining FIFO values until Rust acknowledges them. */
 function emitValue(field, force = false) {
     const value = field.input.value;
     if (force || value !== field.lastEmitted) {
@@ -83,6 +109,7 @@ function emitValue(field, force = false) {
     }
 }
 
+/** Create an editor once so redraws do not replace its caret, selection, or IME state. */
 function createField(id) {
     if (!document.getElementById("native-input-style")) {
         const style = document.createElement("style");
@@ -163,6 +190,11 @@ function updateBorder(field) {
     field.input.style.borderWidth = "1px";
 }
 
+/**
+ * Acknowledge model updates without overwriting newer browser edits. Repeated
+ * values consume only the earliest pending prefix. Explicit resets bypass this
+ * acknowledgement protocol through resetPending.
+ */
 function syncValue(field, value) {
     const acknowledged = field.pending.indexOf(value);
     if (acknowledged >= 0) {
@@ -178,6 +210,10 @@ function syncValue(field, value) {
     field.modelValue = value;
 }
 
+/**
+ * Map logical canvas geometry to CSS pixels, applying scroll clipping and popup
+ * visibility. Recomputing from the canvas rectangle also follows viewport panning.
+ */
 function positionField(field) {
     const canvas = document.querySelector("canvas");
     if (!canvas || !field.geometry) return;
@@ -206,6 +242,11 @@ function positionField(field) {
     }
 }
 
+/**
+ * Update one persistent editor from a visited Iced field.
+ * @param {Array} config ID, label, placeholder, value, invalid flag, help, and error.
+ * @param {number[]} geometry x, y, width, height, clipX, clipY, clipWidth, clipHeight.
+ */
 export function syncField(config, geometry) {
     const [id, label, placeholder, value, invalid, help, error] = config;
     if (!fieldIds.includes(id)) return;

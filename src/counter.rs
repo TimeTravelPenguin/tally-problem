@@ -1,12 +1,24 @@
+//! Mechanical counter rules independent of search or presentation.
+//!
+//! Displays keep their runtime width and leading zeros in most-significant-first
+//! order. An increment carries from the right and wraps at that width. The reset
+//! knob has ten positions: a forward tick moves wheels equal to the old index to
+//! its successor, while a backward tick changes only the knob position. A full
+//! forward revolution gathers all wheels into one uniform display, so grouped
+//! reset operations can be applied without iterating every tick.
+
 use thiserror::Error;
 
 /// Invalid input supplied to a tally counter.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TallyCounterError {
+    /// A counter must have at least one wheel.
     #[error("Invalid digit count: {0}. Value should be greater than 0.")]
     InvalidDigitCount(usize),
+    /// Display elements must be decimal digits, including explicit leading zeros.
     #[error("Invalid digit value: {0}. Value should be in the range 0-9.")]
     InvalidDigitValue(u8),
+    /// The reset knob has positions zero through nine.
     #[error("Invalid reset index: {0}. Value should be in the range 0-9.")]
     InvalidResetIndex(u8),
 }
@@ -54,7 +66,9 @@ impl TallyCounter {
         Ok(())
     }
 
-    /// Sets the reset knob position to a decimal digit.
+    /// Sets the reset knob position without moving any displayed wheels.
+    ///
+    /// Invalid positions return an error without changing the counter.
     pub fn set_reset_index(&mut self, new_reset_index: u8) -> Result<(), TallyCounterError> {
         if new_reset_index > 9 {
             return Err(TallyCounterError::InvalidResetIndex(new_reset_index));
@@ -65,14 +79,17 @@ impl TallyCounter {
         Ok(())
     }
 
+    /// Displayed digits from most significant to least significant.
     pub fn values(&self) -> &[u8] {
         &self.values
     }
 
+    /// Number of wheels, including those currently displaying leading zeros.
     pub fn digit_count(&self) -> usize {
         self.values.len()
     }
 
+    /// Internal reset knob position, independent of the displayed value.
     pub fn reset_index(&self) -> u8 {
         self.reset_index
     }
@@ -96,11 +113,15 @@ impl TallyCounter {
         }
     }
 
+    /// Press the increment button once, preserving the reset index.
     pub fn increment(&mut self) {
         self.increment_by(1);
     }
 
     /// Turns the knob forward, moving each digit that it passes.
+    ///
+    /// Runs in time proportional to the wheel count, regardless of `ticks`.
+    /// Ten or more ticks gather every wheel at the final reset position.
     pub fn reset_forward_by(&mut self, ticks: u64) {
         if ticks == 0 {
             return;
@@ -122,6 +143,7 @@ impl TallyCounter {
         self.reset_index = next;
     }
 
+    /// Advance one knob position and move wheels matching its old position.
     pub fn tick_reset_forward(&mut self) {
         self.reset_forward_by(1);
     }
@@ -131,6 +153,7 @@ impl TallyCounter {
         self.reset_index = sub_mod_10(self.reset_index, (ticks % 10) as u8);
     }
 
+    /// Move the knob backwards one position, leaving all wheel values unchanged.
     pub fn tick_reset_backward(&mut self) {
         self.reset_backward_by(1);
     }

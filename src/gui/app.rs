@@ -1,3 +1,16 @@
+//! Iced application state, event routing, and responsive puzzle views.
+//!
+//! [`Planner`] validates text through the model, starts the platform-specific
+//! background solver, and turns completed searches into results and playback.
+//! Search generations reject reports from cancelled jobs; separate revisions
+//! reject stale focus operations and playback frames. Rendering never runs the
+//! search: redraw sensors update elapsed time and animation between reports.
+//!
+//! Desktop inputs use Iced directly. The browser input bridge supplies native
+//! editors while this module maintains the same validation and keyboard order.
+//! All views use the configured Catppuccin Mocha palette and the root scrollable
+//! keeps controls and long results reachable on smaller windows.
+
 use std::time::Duration;
 
 use iced::keyboard::{self, Key, key::Named};
@@ -21,6 +34,10 @@ use crate::web_input;
 const PAGE: &str = "planner-page";
 const VIDEO_URL: &str = "https://www.youtube.com/watch?v=AT9wAQSV5_4";
 
+/// Application-level keyboard destinations, including controls without Iced focus.
+///
+/// This state supplies activation and focus rings for buttons and the player,
+/// while text inputs also retain their native widget or browser focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Target,
@@ -38,6 +55,7 @@ enum Focus {
 }
 
 impl Focus {
+    /// Stable widget IDs, also used by the browser bridge for the three inputs.
     fn id(self) -> &'static str {
         match self {
             Self::Target => "target-input",
@@ -55,6 +73,7 @@ impl Focus {
         }
     }
 
+    /// The bounds to reveal, including a field's label and validation message.
     fn reveal_id(self) -> &'static str {
         match self {
             Self::Target => "target-field",
@@ -99,6 +118,11 @@ impl Focus {
     }
 }
 
+/// An active solver's cancellation handle, replay input, and timing observations.
+///
+/// Worker elapsed time feeds the estimate; the UI clock keeps the elapsed label
+/// moving independently of worker report intervals. Retaining the control keeps
+/// the solver alive, and dropping the job cancels it.
 struct Job {
     _control: solver::Control,
     prepared: PreparedSearch,
@@ -110,6 +134,7 @@ struct Job {
 }
 
 impl Job {
+    /// Use a prediction only while its source report is recent enough to display.
     fn timing_prediction(&self) -> Option<TimingPrediction> {
         // A long batch can outlive the prediction from its preceding report.
         if self.reported_at?.elapsed() > Duration::from_secs(2) {
@@ -120,6 +145,10 @@ impl Job {
     }
 }
 
+/// Own the form, active job, completed solution, playback, and keyboard focus.
+///
+/// All state changes pass through [`Self::update`]. Generation and revision
+/// checks isolate each search, animation, and asynchronous focus request.
 pub struct Planner {
     form: Form,
     focus: Option<Focus>,
@@ -136,16 +165,21 @@ pub struct Planner {
     video_error: Option<String>,
 }
 
+/// User actions and asynchronous reports consumed by [`Planner::update`].
 #[derive(Debug, Clone)]
 pub enum Message {
     TargetChanged(String),
     StartChanged(String),
     ResetIndexChanged(String),
+    /// Submit from an input while preserving its focus.
     Solve,
+    /// Submit from a button or browser editor, moving focus to Cancel if running.
     SolvePressed,
     ResetForm,
     OpenVideo,
+    /// A backend report paired with the search generation that started it.
     Progress(u64, Result<solver::Update, String>),
+    /// A redraw clock sample paired with its search generation.
     SearchFrame(u64, Instant),
     PlaybackToggle,
     PlaybackPrevious,
@@ -153,16 +187,20 @@ pub enum Message {
     PlaybackRestart,
     PlaybackSpeed(f32),
     PlaybackSpeedFocused,
+    /// Search generation, playback revision, and frame time captured by a sensor.
     PlaybackFrame(u64, u64, Instant),
     KeyPressed(Key, keyboard::Modifiers),
     PointerPressed,
+    /// Focus query result paired with the navigation revision that requested it.
     InputFocused(u64, &'static str, bool),
+    /// Proposed scroll offset paired with the current navigation revision.
     RevealFocus(u64, Option<f32>),
     #[cfg(target_arch = "wasm32")]
     WebInput(web_input::Event),
 }
 
 impl Planner {
+    /// Create the default form and an initial Iced focus operation for the target.
     pub fn new() -> (Self, Task<Message>) {
         (
             Self {
@@ -184,6 +222,10 @@ impl Planner {
         )
     }
 
+    /// Listen for unhandled canvas keys, pointer focus changes, and web input events.
+    ///
+    /// Repeated activation keys are ignored. Browser editors keep ordinary
+    /// typing and selection events and send only their application-level actions.
     pub fn subscription(&self) -> Subscription<Message> {
         let canvas = event::listen_with(|event, status, _window| match event {
             Event::Keyboard(keyboard::Event::KeyPressed {
@@ -215,6 +257,10 @@ impl Planner {
         canvas
     }
 
+    /// Apply one event and return any background or widget operations it schedules.
+    ///
+    /// Stale search, playback, and focus reports are discarded before changing
+    /// state. Input edits invalidate the previous result and cancel active work.
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             #[cfg(target_arch = "wasm32")]
@@ -492,6 +538,7 @@ impl Planner {
         Task::none()
     }
 
+    /// Invalidate asynchronous search and playback work and drop the active handle.
     fn cancel(&mut self) {
         self.generation += 1;
         self.job = None;
@@ -509,6 +556,7 @@ impl Planner {
         self.error = None;
     }
 
+    /// Prepare the form and launch a new generation, or focus the first invalid field.
     fn solve(&mut self) -> Task<Message> {
         if self.job.is_some() {
             return Task::none();
@@ -552,6 +600,7 @@ impl Planner {
         task.map(move |progress| Message::Progress(generation, progress))
     }
 
+    /// Move browser focus synchronously, then update Iced focus and page visibility.
     fn focus(&mut self, focus: Focus) -> Task<Message> {
         #[cfg(target_arch = "wasm32")]
         web_input::focus(focus.id());
@@ -559,6 +608,9 @@ impl Planner {
         self.focus_widgets(focus)
     }
 
+    /// Update Iced focus without moving DOM focus that a native event already changed.
+    ///
+    /// A new revision protects the eventual reveal result from later navigation.
     fn focus_widgets(&mut self, focus: Focus) -> Task<Message> {
         self.focus = Some(focus);
         self.focus_revision += 1;
@@ -573,6 +625,7 @@ impl Planner {
         ])
     }
 
+    /// List currently usable controls, omitting disabled actions and absent results.
     fn focus_order(&self) -> Vec<Focus> {
         let mut controls = vec![Focus::Target, Focus::Start, Focus::ResetIndex];
 
@@ -622,6 +675,7 @@ impl Planner {
         order[next]
     }
 
+    /// Route unhandled keys to navigation, activation, scrolling, or player controls.
     fn key_pressed(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Message> {
         if self.focus == Some(Focus::PlaybackSpeed)
             && let Some(playback) = &self.playback
@@ -679,6 +733,7 @@ impl Planner {
         Task::none()
     }
 
+    /// Build the responsive page from current state without performing solver work.
     pub fn view(&self) -> Element<'_, Message> {
         responsive(move |size| {
             let compact = size.width < 620.0;
@@ -772,6 +827,9 @@ impl Planner {
         }).into()
     }
 
+    /// Show measured milestones and either a recent timing estimate or activity.
+    ///
+    /// Redraw sensors keep the clock moving even during a slow backend batch.
     fn searching(&self, job: &Job, compact: bool) -> Element<'_, Message> {
         let generation = self.generation;
         let prediction = job.timing_prediction();
@@ -908,6 +966,7 @@ impl Planner {
         card(content, false)
     }
 
+    /// Compose the animated counter and accessible controls around a playback frame.
     fn player<'a>(&'a self, playback: &'a Playback, compact: bool) -> Element<'a, Message> {
         let frame = playback.frame(self.playback_now);
         let generation = self.generation;
@@ -1089,6 +1148,7 @@ impl Planner {
             .into()
     }
 
+    /// Render grouped actions with their resulting digits and reset positions.
     fn results<'a>(&'a self, solution: &'a Solution, compact: bool) -> Element<'a, Message> {
         let stats = [
             stat("Minimum increments", solution.increments.to_string(), false),
@@ -1234,6 +1294,7 @@ fn search_bar(percent: f32, completed: bool) -> Element<'static, Message> {
         .into()
 }
 
+/// Animate search activity without implying a known fraction of remaining work.
 fn activity_bar(elapsed: Duration) -> Element<'static, Message> {
     let phase = (elapsed.as_secs_f64() / 2.4).fract();
     let position = 1.0 - (2.0 * phase - 1.0).abs();
@@ -1277,6 +1338,10 @@ fn activity_bar(elapsed: Duration) -> Element<'static, Message> {
         .into()
 }
 
+/// Combine a labelled editor, help tooltip, validation, and reveal anchor.
+///
+/// Browser builds wrap the same Iced editor with a DOM input; both paths share
+/// the form's validation and stable focus IDs.
 #[allow(clippy::too_many_arguments)]
 fn field<'a>(
     label: &'static str,

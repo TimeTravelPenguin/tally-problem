@@ -1,12 +1,24 @@
+//! Form validation and display data shared by the desktop and browser GUIs.
+//!
+//! [`Form::prepare`] preserves decimal text, including leading zeros, while
+//! converting a valid form into the library's counter and target types. After
+//! the background search finishes, [`PreparedSearch::finish`] replays its
+//! grouped actions to produce the values, totals, and reset groups shown by the
+//! UI and sequence player. This module has no dependency on Iced widgets.
+
 use tally_problem::{Action, SearchResult, TallyCounter};
 
 #[cfg(test)]
 use tally_problem::search;
 
+/// Editable text kept independently of parsing so incomplete input stays visible.
 #[derive(Debug, Clone)]
 pub struct Form {
+    /// Decimal target text; its length determines the counter width.
     pub target: String,
+    /// Decimal initial digits, or an empty string to start with all zeros.
     pub start: String,
+    /// A single decimal digit specifying the initial reset knob position.
     pub reset_index: String,
 }
 
@@ -20,6 +32,10 @@ impl Default for Form {
     }
 }
 
+/// Per-field messages for both inline validation and focusing the first error.
+///
+/// A missing message means that field is valid. Width matching is checked only
+/// after the target itself is valid, avoiding misleading secondary errors.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Validation {
     pub target: Option<String>,
@@ -28,12 +44,17 @@ pub struct Validation {
 }
 
 impl Validation {
+    /// Whether all three fields are ready to prepare a search.
     pub fn is_valid(&self) -> bool {
         self.target.is_none() && self.start.is_none() && self.reset_index.is_none()
     }
 }
 
 impl Form {
+    /// Validate ASCII decimal digits, matching widths, and the reset index.
+    ///
+    /// The target must contain at least one digit; the starting value may be
+    /// blank. There is no fixed limit on the number of counter digits.
     pub fn validate(&self) -> Validation {
         let mut validation = Validation::default();
 
@@ -61,6 +82,11 @@ impl Form {
         validation
     }
 
+    /// Convert valid text into solver input, or return errors attached to fields.
+    ///
+    /// A blank starting value creates a zeroed counter of the target's width.
+    /// No search runs here; the application passes the prepared data to its
+    /// background solver.
     pub fn prepare(&self) -> Result<PreparedSearch, Validation> {
         let validation = self.validate();
 
@@ -94,27 +120,36 @@ impl Form {
     }
 }
 
+/// Validated solver input retained until the search result can be replayed.
 #[derive(Debug, Clone)]
 pub struct PreparedSearch {
     pub counter: TallyCounter,
     pub target: Vec<u8>,
 }
 
+/// A solved sequence with display text and totals for the results and player.
+///
+/// Values retain the original counter width. Each step represents one grouped
+/// action, while the player can expand its tick count incrementally.
 #[derive(Debug, Clone)]
 pub struct Solution {
     pub target: String,
     pub start: String,
+    /// Knob position before any action, independent of the initial digit text.
     pub initial_reset_index: u8,
     pub increments: u64,
     pub reset_ticks: u64,
     pub steps: Vec<Step>,
 }
 
+/// A grouped action and the counter state after all of its ticks have been applied.
 #[derive(Debug, Clone)]
 pub struct Step {
     pub action: Action,
     pub value: String,
     pub reset_index: u8,
+    /// True for the first reset action after an increment or at sequence start.
+    /// Adjacent forward and backward resets share one displayed reset group.
     pub starts_reset_group: bool,
 }
 
@@ -126,6 +161,10 @@ impl PreparedSearch {
         self.finish(result)
     }
 
+    /// Replay a completed search into display steps, or report an unreachable target.
+    ///
+    /// Applying the returned actions to the retained initial counter provides
+    /// the value and reset index at every reported step, without another search.
     pub fn finish(self, result: SearchResult) -> Result<Solution, String> {
         let actions = match result {
             SearchResult::Found(actions) => actions,
@@ -178,10 +217,12 @@ fn is_ascii_digits(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|digit| digit.is_ascii_digit())
 }
 
+/// Parse text that has already passed [`Form::validate`].
 fn parse_digits(value: &str) -> Vec<u8> {
     value.bytes().map(|digit| digit - b'0').collect()
 }
 
+/// Preserve every wheel, including leading zeros, in displayed digit order.
 fn format_values(values: &[u8]) -> String {
     values
         .iter()

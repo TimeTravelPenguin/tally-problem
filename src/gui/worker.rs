@@ -1,3 +1,17 @@
+//! Solver implementation loaded inside a dedicated browser Web Worker.
+//!
+//! After installing the request handler, the worker announces `ready`. It
+//! accepts `["search-v1", starting_digits, target_digits, reset_index]`, with
+//! digits supplied as typed byte arrays. Successful responses have the shape
+//! `["update-v1", kind, payload, statistics, elapsed_ms]`; kinds distinguish
+//! progress, a found sequence, and an exhausted search. Errors use `error-v1`.
+//!
+//! Statistics follow the shared order: visited groups, increment layer, reset
+//! ticks, diagram nodes, cumulative diagram work, and queued groups. All `u64`
+//! fields, including action ticks, are decimal strings to retain exact values.
+//! Search batches throttle progress messages without blocking the browser UI;
+//! cancellation is handled by terminating this worker from the UI.
+
 use js_sys::{Array, Uint8Array};
 use tally_problem::{
     Action, SearchProgress, SearchResult, SearchSession, SearchStatistics, TallyCounter,
@@ -18,6 +32,7 @@ struct SearchClock {
 }
 
 impl SearchClock {
+    /// Start timing before request decoding, counter setup, and solver allocation.
     fn new(scope: &DedicatedWorkerGlobalScope) -> Self {
         let performance = scope
             .performance()
@@ -33,6 +48,7 @@ impl SearchClock {
         }
     }
 
+    /// Return finite, nondecreasing milliseconds even if a fallback clock changes.
     fn elapsed_ms(&mut self) -> f64 {
         let now = self
             .performance
@@ -53,6 +69,10 @@ impl SearchClock {
     }
 }
 
+/// Install the worker's request handler and tell the UI it can send its search.
+///
+/// The handler is retained for the worker's lifetime. Each GUI job owns its own
+/// worker, which the UI terminates on cancellation or after releasing the job.
 pub fn install() {
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
     let message_scope = scope.clone();
@@ -74,6 +94,10 @@ pub fn install() {
     let _ = scope.post_message(&ready);
 }
 
+/// Validate one request and run its search entirely within the worker.
+///
+/// Elapsed timing includes setup, and each response pairs the same batch's
+/// progress and statistics. Completion bypasses the progress reporting interval.
 fn run_search(scope: &DedicatedWorkerGlobalScope, data: JsValue) -> Result<(), String> {
     let mut clock = SearchClock::new(scope);
 
@@ -137,6 +161,10 @@ fn run_search(scope: &DedicatedWorkerGlobalScope, data: JsValue) -> Result<(), S
     Ok(())
 }
 
+/// Encode a result and its telemetry using the `update-v1` positional schema.
+///
+/// Found actions carry a kind and decimal tick count. Progress carries the
+/// visited-group count; an exhausted search carries a null payload.
 fn encode_progress(
     progress: SearchProgress,
     statistics: SearchStatistics,

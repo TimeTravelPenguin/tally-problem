@@ -1,10 +1,29 @@
+//! Canonical decision diagrams for sets of fixed-width decimal displays.
+//!
+//! Each node selects a digit from ten outgoing branches. Roots read the least
+//! significant digit first, allowing increment preimages to share every branch
+//! except the carry path. Identical child arrays are interned into a shared DAG;
+//! hash collisions are checked against the full array, so identity stays exact.
+//!
+//! Union, difference, and inverse reset transformations use iterative traversal
+//! with operation caches, avoiding stack depth proportional to the counter width.
+//! Children always precede their parent in storage. This ordering permits linear
+//! reachability and rebuilding during compaction, after which callers remap all
+//! retained roots. Empty and terminal sets have reserved identifiers.
+//!
+//! Fallible growth maps allocation failures to the search error type. The work
+//! counter tracks approximate node operations for telemetry, rather than counting
+//! represented displays or promising a fixed cost per operation.
+
 use std::hash::BuildHasher;
 
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 
 use super::SearchError;
 
+/// Arena identifier, valid only until the next compaction remaps retained roots.
 pub(super) type NodeId = u32;
+/// The empty word set at any depth; no arena node is allocated for it.
 pub(super) const EMPTY: NodeId = 0;
 const TERMINAL: NodeId = 1;
 
@@ -21,6 +40,7 @@ pub(super) struct Diagram {
     work: u64,
 }
 
+/// One canonical digit branching array and its fingerprint collision chain.
 #[derive(Debug)]
 struct Node {
     children: [NodeId; 10],
@@ -30,6 +50,7 @@ struct Node {
 }
 
 impl Diagram {
+    /// Build a root containing exactly one most-significant-first digit string.
     pub(super) fn singleton(&mut self, digits: &[u8]) -> Result<NodeId, SearchError> {
         let mut root = TERMINAL;
 
@@ -42,6 +63,7 @@ impl Diagram {
         Ok(root)
     }
 
+    /// Test a concrete, equally wide display without allocating or mutating caches.
     pub(super) fn contains(&self, mut root: NodeId, digits: &[u8]) -> bool {
         for &digit in digits.iter().rev() {
             if root == EMPTY {
@@ -54,10 +76,12 @@ impl Diagram {
         root == TERMINAL
     }
 
+    /// Canonical set union of roots with the same word width.
     pub(super) fn union(&mut self, left: NodeId, right: NodeId) -> Result<NodeId, SearchError> {
         self.combine(left, right, false)
     }
 
+    /// Words present in `left` but absent from the equally wide `right` root.
     pub(super) fn difference(
         &mut self,
         left: NodeId,
@@ -66,6 +90,7 @@ impl Diagram {
         self.combine(left, right, true)
     }
 
+    /// Evaluate a binary set operation in iterative postorder, caching node pairs.
     fn combine(
         &mut self,
         left: NodeId,
@@ -124,6 +149,7 @@ impl Diagram {
         Ok(self.combined(left, right, difference).unwrap())
     }
 
+    /// Resolve identities and cached pairs before expanding a binary operation.
     fn combined(&self, left: NodeId, right: NodeId, difference: bool) -> Option<NodeId> {
         if right == EMPTY || (!difference && left == right) {
             return Some(left);
@@ -238,6 +264,7 @@ impl Diagram {
         Ok(self.reset_preimages[&(root, reset)])
     }
 
+    /// Drop derived operation results while retaining all interned diagram nodes.
     pub(super) fn clear_caches(&mut self) {
         self.record_work(self.cached_entries());
         self.unions.clear();
@@ -246,6 +273,7 @@ impl Diagram {
         self.increments.clear();
     }
 
+    /// Approximate the cost of clearing cached operation maps.
     fn cached_entries(&self) -> usize {
         self.unions
             .len()
@@ -326,22 +354,27 @@ impl Diagram {
         Ok(mapping)
     }
 
+    /// Allocated nonterminal nodes, including nodes awaiting collection.
     pub(super) fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
+    /// Cumulative approximate operations, retained across compaction and cache clears.
     pub(super) fn work(&self) -> u64 {
         self.work
     }
 
+    /// Saturating telemetry accounting; exhaustion never changes set semantics.
     fn record_work(&mut self, amount: usize) {
         self.work = self.work.saturating_add(amount as u64);
     }
 
+    /// Read a nonterminal node's branches; reserved identifiers must be handled first.
     fn children(&self, node: NodeId) -> [NodeId; 10] {
         self.nodes[node as usize - 2].children
     }
 
+    /// Reuse an exact branching array or append it after all of its children.
     fn intern(&mut self, children: [NodeId; 10]) -> Result<NodeId, SearchError> {
         self.record_work(1);
 
@@ -389,6 +422,7 @@ impl Diagram {
     }
 }
 
+/// Fallible map growth shared by the diagram arena and search frontier.
 pub(super) fn insert<Key: std::hash::Hash + Eq, Value>(
     map: &mut HashMap<Key, Value>,
     key: Key,
@@ -401,6 +435,7 @@ pub(super) fn insert<Key: std::hash::Hash + Eq, Value>(
     Ok(())
 }
 
+/// Fallible vector growth for traversal stacks and reconstructed actions.
 pub(super) fn push<Value>(buffer: &mut Vec<Value>, value: Value) -> Result<(), SearchError> {
     buffer
         .try_reserve(1)

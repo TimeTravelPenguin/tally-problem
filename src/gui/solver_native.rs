@@ -1,3 +1,10 @@
+//! Desktop backend that runs each search on a dedicated operating-system thread.
+//!
+//! The Iced task starts the thread and receives its snapshots through a channel.
+//! Search initialization is included in monotonic elapsed timing. The worker
+//! checks cancellation and receiver closure between bounded search batches;
+//! progress is throttled, while final results and errors are delivered promptly.
+
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -13,6 +20,10 @@ use super::Update;
 const SEARCH_BATCH: usize = 256;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
 
+/// A cancellation handle for the search thread.
+///
+/// Dropping it requests a stop at the next batch boundary without waiting on
+/// the UI thread for the worker to finish.
 pub struct Control {
     cancelled: Arc<AtomicBool>,
 }
@@ -23,6 +34,10 @@ impl Drop for Control {
     }
 }
 
+/// Return the job's cancellation handle and the task that starts its worker.
+///
+/// Thread startup failures, solver errors, and unwinding panics are reported
+/// through the same stream as successful updates.
 pub fn start(counter: TallyCounter, target: Vec<u8>) -> (Control, Task<Result<Update, String>>) {
     let cancelled = Arc::new(AtomicBool::new(false));
     let control = Control {
@@ -62,6 +77,10 @@ pub fn start(counter: TallyCounter, target: Vec<u8>) -> (Control, Task<Result<Up
     (control, task)
 }
 
+/// Initialize and advance the search until completion, cancellation, or disconnect.
+///
+/// Statistics and elapsed time are sampled after the same batch. The reporting
+/// interval is an argument so tests can request an update from every batch.
 fn run_search(
     counter: TallyCounter,
     target: Vec<u8>,

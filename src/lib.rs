@@ -1,6 +1,11 @@
 //! A tally counter simulation and a solver that minimizes increments, then reset ticks.
 //!
 //! The counter, actions, search results, and errors are independent of any user interface.
+//! [`TallyCounter`] owns the mechanical rules; [`search()`] provides exact
+//! lexicographic optimization, [`SearchSession`] supports background batches,
+//! and [`increment_lower_bound`] supplies a guaranteed solution-cost milestone.
+//! Counter widths are dynamic and leading zeros are significant. Large action
+//! counts use `u64`; difficult searches can still exhaust time or memory.
 //!
 //! ```
 //! use tally_problem::{SearchResult, TallyCounter, search};

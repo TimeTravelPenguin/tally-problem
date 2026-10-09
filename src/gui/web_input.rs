@@ -1,6 +1,17 @@
-// Winit 0.30's web IME methods are no-ops, so canvas inputs cannot open a
-// software keyboard: https://github.com/rust-windowing/winit/issues/3938.
-// Keep Iced's layout and focus state, with browser editors for the three fields.
+//! WASM-only native browser editors positioned over the Iced form fields.
+//!
+//! Winit 0.30's web IME methods are no-ops, so canvas text inputs cannot open a
+//! software keyboard: <https://github.com/rust-windowing/winit/issues/3938>.
+//! [`field`] preserves Iced's layout and focus operations, while JavaScript owns
+//! the visible editor, selection, paste, and composition. [`subscription`] sends
+//! whole values and application keys back to the same form model.
+//!
+//! [`layer`] reconciles editors with each rendered frame, hiding culled fields
+//! and temporarily exposing the Iced fallback underneath overlapping popups.
+//! [`reset`] updates browser values synchronously and invalidates queued events.
+//! Geometry assumes the three fields live in the root full-window scrollable;
+//! it is not a general-purpose bridge for nested forms or arbitrary themes.
+
 use std::cell::{Cell, RefCell};
 
 use iced::advanced::{
@@ -32,23 +43,30 @@ extern "C" {
     fn occlude_fields(x: f32, y: f32, width: f32, height: f32);
 }
 
+/// A browser event stamped with the form revision when its callback ran.
 #[derive(Debug, Clone)]
 pub(crate) struct Event {
+    /// The edit, focus, navigation, or submit action to apply.
     pub(crate) kind: Kind,
     revision: u64,
 }
 
 impl Event {
+    /// Reject edits and focus actions queued before the most recent form reset.
     pub(crate) fn is_current(&self) -> bool {
         REVISION.with(|revision| revision.get() == self.revision)
     }
 }
 
+/// Browser-owned editing plus the small set of keys handled by the application.
 #[derive(Debug, Clone)]
 pub(crate) enum Kind {
+    /// Complete native editor text, preserving zeros and intermediate input.
     Changed(&'static str, String),
     Focused(&'static str),
+    /// Origin field, key, and modifiers before JavaScript moves focus for Tab.
     KeyPressed(&'static str, Key, Modifiers),
+    /// Enter after the current editor value has been sent through the same queue.
     Submit,
 }
 
@@ -59,6 +77,7 @@ thread_local! {
     static REVISION: Cell<u64> = const { Cell::new(0) };
 }
 
+/// Install one retained JavaScript callback and stream browser events into Iced.
 pub(crate) fn subscription() -> Subscription<Event> {
     Subscription::run(events)
 }
@@ -97,16 +116,27 @@ fn events() -> impl Stream<Item = Event> {
     receiver
 }
 
+/// Focus a native editor, or the canvas for a non-input control ID.
+///
+/// Visible inputs are focused synchronously to preserve a browser user gesture.
+/// Offscreen requests wait for a subsequent draw to reveal the field; a later
+/// pointer action cancels the pending request.
 pub(crate) fn focus(id: &'static str) {
     focus_element(id);
 }
 
+/// Install target, starting value, and reset-index text after a form reset.
+///
+/// Applying the values immediately distinguishes a reset from an older model
+/// redraw, even when the reset repeats the previous value. New input can arrive
+/// before the next draw without being overwritten by it.
 pub(crate) fn reset(values: [&str; 3]) {
     REVISION.with(|revision| revision.set(revision.get().wrapping_add(1)));
     let values = values.into_iter().map(JsValue::from_str).collect();
     reset_pending(&values);
 }
 
+/// Identify actual DOM focus when an asynchronous Iced focus query may be stale.
 pub(crate) fn active_field() -> Option<&'static str> {
     field_id(&active_field_id())
 }
@@ -137,10 +167,15 @@ fn keyboard_modifiers(bits: u8) -> Modifiers {
     modifiers
 }
 
+/// Wrap the root page so each draw reconciles native editors and Iced overlays.
+///
+/// This wrapper must surround the full-window scrollable, where its own draw
+/// cannot be culled together with the individual form fields.
 pub(crate) fn layer<'a, Message: 'a>(content: Element<'a, Message>) -> Element<'a, Message> {
     Element::new(Layer { content })
 }
 
+/// A transparent root widget that brackets drawing and wraps popup overlays.
 struct Layer<'a, Message> {
     content: Element<'a, Message>,
 }
@@ -262,6 +297,7 @@ fn wrap_overlay<'a, Message: 'a>(
     overlay::Element::new(Box::new(Overlay { content, viewport }))
 }
 
+/// Hide only browser editors underneath a canvas popup, retaining their focus.
 struct Overlay<'a, Message> {
     content: overlay::Element<'a, Message, Theme, iced::Renderer>,
     viewport: Rectangle,
@@ -338,6 +374,7 @@ impl<Message> overlay::Overlay<Message, Theme, iced::Renderer> for Overlay<'_, M
     }
 }
 
+/// Find painted popup bounds beneath Iced's full-window overlay group nodes.
 fn occlude(layout: Layout<'_>, viewport: Rectangle) {
     let bounds = layout.bounds();
     let children = layout.children();
@@ -353,6 +390,10 @@ fn occlude(layout: Layout<'_>, viewport: Rectangle) {
     }
 }
 
+/// Preserve an Iced editor's geometry and focus while browser text sits over it.
+///
+/// The wrapped editor is still drawn as a fallback when an overlapping tooltip
+/// hides its DOM counterpart. Its ID must be one of the three form field IDs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn field<'a, Message: 'a>(
     content: Element<'a, Message>,
@@ -376,6 +417,7 @@ pub(crate) fn field<'a, Message: 'a>(
     })
 }
 
+/// An editor's native metadata with its original Iced widget retained as a child.
 struct Field<'a, Message> {
     content: Element<'a, Message>,
     id: &'static str,

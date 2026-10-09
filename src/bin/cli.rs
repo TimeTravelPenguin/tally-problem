@@ -1,3 +1,10 @@
+//! Command-line entry point for solving and displaying a tally puzzle.
+//!
+//! The target's digits define the counter width, including leading zeros.
+//! Optional starting digits and a reset index configure its initial state.
+//! The CLI runs the library solver, prints the two optimization costs, and
+//! replays grouped actions into a table of resulting values and reset indices.
+
 use std::{error::Error, process::ExitCode, str::FromStr};
 
 use clap::Parser;
@@ -23,6 +30,7 @@ struct Cli {
     reset_index: u8,
 }
 
+/// Parsed decimal digits that retain the supplied width and leading zeros.
 #[derive(Debug, Clone)]
 struct Digits(Vec<u8>);
 
@@ -38,6 +46,7 @@ impl FromStr for Digits {
     }
 }
 
+/// Parse CLI arguments and report runtime errors with a failing exit code.
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -51,6 +60,7 @@ fn main() -> ExitCode {
     }
 }
 
+/// Configure the counter, solve it, and print costs followed by the replay table.
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let target = cli.target.0;
     let mut counter = TallyCounter::new(target.len())?;
@@ -91,6 +101,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Replay each grouped action and print the counter state after that action.
+///
+/// Consecutive resets share a label while keeping their directions on separate
+/// aligned rows, making changes of direction easier to follow.
 fn print_actions(initial: &TallyCounter, actions: &[Action]) {
     let mut counter = initial.clone();
     let mut table = Table::new();
@@ -144,6 +158,7 @@ fn action_details(action: Action) -> (&'static str, &'static str, u64) {
     }
 }
 
+/// Format the display without losing any leading zeros.
 fn format_values(values: &[u8]) -> String {
     values
         .iter()

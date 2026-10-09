@@ -1,3 +1,14 @@
+//! Stateless rendering of the solution player's replay snapshots.
+//!
+//! The playback model owns counter operations and time; these widgets only draw
+//! the exact states and eased progress it supplies. Wheel motion uses separate
+//! directions for counter digits and the reset index, while instructions fade
+//! between the corresponding labels.
+//!
+//! Short counters fit in a centered row. Long counters stop shrinking at a
+//! readable minimum and scroll horizontally, with the reset wheel pinned beside
+//! the scrolling digits. Drawing visits only wheels intersecting the viewport.
+
 use iced::advanced::{
     Layout, Widget, layout, mouse, renderer, text as rendered_text, widget::Tree,
 };
@@ -16,8 +27,10 @@ const DISPLAY_HEIGHT: f32 = 94.0;
 const INSTRUCTION_HEIGHT: f32 = 52.0;
 const MINIMUM_SCALE: f32 = 0.75;
 
-/// Render only the visible wheels. Wider counters retain readable digits and
-/// scroll horizontally instead of shrinking indefinitely or clipping the value.
+/// Lay out a replay frame with readable digits and a continuously visible reset index.
+///
+/// A fitting counter is centered as one widget. Otherwise, only the digit row
+/// scrolls, and a separate reset wheel occupies the fixed column beside it.
 pub(crate) fn view<'a, Message: 'a>(frame: Frame<'a>) -> Element<'a, Message> {
     responsive(move |size| {
         let metrics = Metrics::new(frame.current_digits.len(), size.width);
@@ -61,7 +74,10 @@ pub(crate) fn view<'a, Message: 'a>(frame: Frame<'a>) -> Element<'a, Message> {
     .into()
 }
 
-/// Keep instructions in a fixed-height slot while action changes fade gently.
+/// Crossfade instruction labels in a fixed-height slot without shifting controls.
+///
+/// `progress` is the animation fraction supplied by the playback model. Equal
+/// labels draw once; invalid progress falls back to the completed transition.
 pub(crate) fn instruction<'a, Message: 'a>(
     previous: &'a str,
     current: &'a str,
@@ -74,6 +90,7 @@ pub(crate) fn instruction<'a, Message: 'a>(
     })
 }
 
+/// Shared wheel geometry, scaled no lower than 75% of its natural dimensions.
 #[derive(Debug, Clone, Copy)]
 struct Metrics {
     scale: f32,
@@ -126,6 +143,7 @@ impl Metrics {
         }
     }
 
+    /// Find intersecting digit slots without traversing the entire counter.
     fn visible_digits(self, origin: Point, viewport: Rectangle) -> std::ops::Range<usize> {
         let stride = (WHEEL_WIDTH + WHEEL_GAP) * self.scale;
         let start = ((viewport.x - origin.x) / stride).floor().max(0.0) as usize;
@@ -137,6 +155,7 @@ impl Metrics {
     }
 }
 
+/// Draw all wheels, only the scrolling digits, or only the pinned reset index.
 struct Wheels<'a> {
     frame: Frame<'a>,
     metrics: Metrics,
@@ -260,6 +279,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Wheels<'_> {
     }
 }
 
+/// Exact numeral endpoints plus independent visual motion and styling.
 struct WheelAppearance {
     previous: u8,
     current: u8,
@@ -271,6 +291,10 @@ struct WheelAppearance {
     font_size: f32,
 }
 
+/// Clip outgoing and incoming numerals inside the wheel's rounded face.
+///
+/// Values never count through intermediate numerals: a reset or decimal wrap
+/// animates directly between the two exact states provided by the model.
 fn draw_wheel(
     renderer: &mut iced::Renderer,
     bounds: Rectangle,
@@ -375,6 +399,7 @@ fn draw_digit(
     );
 }
 
+/// A fixed layout slot whose two labels share one clipped drawing layer.
 struct Instruction<'a> {
     previous: &'a str,
     current: &'a str,
@@ -478,6 +503,7 @@ fn draw_text(
     );
 }
 
+/// Clamp animation progress, treating nonfinite input as already complete.
 fn bounded_progress(progress: f32) -> f32 {
     if progress.is_finite() {
         progress.clamp(0.0, 1.0)
@@ -486,6 +512,10 @@ fn bounded_progress(progress: f32) -> f32 {
     }
 }
 
+/// Vertical offsets for the outgoing and incoming numerals, respectively.
+///
+/// Forward motion carries the old numeral up and introduces the new one from
+/// below; backward motion reverses that travel. The new numeral ends centered.
 fn roll_offsets(progress: f32, height: f32, direction: RollDirection) -> (f32, f32) {
     let progress = bounded_progress(progress);
     let sign = match direction {

@@ -1,3 +1,14 @@
+//! Exact replay state and scheduling for the solution player.
+//!
+//! Grouped solver actions stay grouped in memory. Each forward move applies one
+//! real counter tick, then exposes the old and new states for animation. Moving
+//! backward rebuilds the preceding position from the starting counter because a
+//! reset can destroy information and cannot generally be inverted.
+//!
+//! Counter state changes immediately; animation only interpolates its display.
+//! The caller drives [`Playback::advance`] and redraws according to
+//! [`Playback::next_frame_delay`]. Rendering belongs to `playback_view`.
+
 use std::time::Duration;
 
 use iced::time::Instant;
@@ -9,20 +20,29 @@ const DEFAULT_SPEED: f32 = 3.0;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_TRANSITION: Duration = Duration::from_millis(180);
 
+/// Visual wheel motion, independent of the numerical distance between digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RollDirection {
+    /// The old numeral leaves upward and the new numeral enters from below.
     Forward,
+    /// The old numeral leaves downward and the new numeral enters from above.
     Backward,
+    /// Keep the current numeral centered without rolling.
     Still,
 }
 
-/// A borrowed view of the two exact states surrounding the current single tick.
+/// A borrowed presentation snapshot for the latest single-tick transition.
+///
+/// Digits and reset indices are exact counter states, rather than interpolated
+/// values. The renderer uses `progress` and the separate wheel directions to
+/// animate between them. Once settled, both states describe the same position.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Frame<'a> {
     pub(crate) previous_digits: &'a [u8],
     pub(crate) current_digits: &'a [u8],
     pub(crate) previous_reset_index: u8,
     pub(crate) reset_index: u8,
+    /// Smoothstep-eased animation progress, bounded to `0.0..=1.0`.
     pub(crate) progress: f32,
     pub(crate) digit_direction: RollDirection,
     pub(crate) reset_direction: RollDirection,
@@ -36,6 +56,10 @@ pub(crate) struct Frame<'a> {
 }
 
 /// Replays grouped operations one tick at a time without expanding the sequence.
+///
+/// All methods receiving a solution must use the same solution passed to
+/// [`Self::new`], unless [`Self::restart`] replaces the playback state. Playback
+/// owns the current counter and one previous snapshot, not a history of ticks.
 #[derive(Debug)]
 pub(crate) struct Playback {
     counter: TallyCounter,
@@ -43,7 +67,9 @@ pub(crate) struct Playback {
     previous_reset_index: u8,
     instruction: String,
     previous_instruction: String,
+    /// Instruction containing the next tick; may equal the sequence length.
     step_index: usize,
+    /// Ticks already applied within `step_index`; zero at a group boundary.
     ticks_in_step: u64,
     step_count: usize,
     active_step: Option<usize>,
@@ -59,6 +85,7 @@ pub(crate) struct Playback {
 }
 
 impl Playback {
+    /// Start paused at the validated initial state, skipping zero-tick actions.
     pub(crate) fn new(solution: &Solution) -> Self {
         let counter = initial_counter(solution);
         let total_ticks = solution.steps.iter().fold(0_u64, |acc, step| {
@@ -90,6 +117,7 @@ impl Playback {
         playback
     }
 
+    /// Borrow exact states and evaluate animation progress without advancing.
     pub(crate) fn frame(&self, now: Instant) -> Frame<'_> {
         let linear_progress = self.transition_started_at.map_or(1.0, |started_at| {
             (now.saturating_duration_since(started_at).as_secs_f32()
@@ -119,6 +147,7 @@ impl Playback {
         self.playing
     }
 
+    /// Whether every tick has been applied, even if its final animation remains.
     pub(crate) fn is_finished(&self) -> bool {
         self.step_index >= self.step_count
     }
@@ -131,10 +160,14 @@ impl Playback {
         !self.is_finished()
     }
 
+    /// Automatic playback rate in ticks per second.
     pub(crate) fn speed(&self) -> f32 {
         self.speed
     }
 
+    /// Settle the display and schedule the first tick one interval from `now`.
+    ///
+    /// Playing a finished sequence restarts it while retaining the chosen speed.
     pub(crate) fn play(&mut self, solution: &Solution, now: Instant) {
         if self.is_finished() {
             self.restart(solution);
@@ -155,12 +188,16 @@ impl Playback {
         self.settle();
     }
 
+    /// Replace the replay with a paused initial state, retaining playback speed.
     pub(crate) fn restart(&mut self, solution: &Solution) {
         let speed = self.speed;
         *self = Self::new(solution);
         self.speed = speed;
     }
 
+    /// Set a finite rate clamped to 1–8 ticks per second and settle animation.
+    ///
+    /// If playing, the next tick is rescheduled from `now` at the new rate.
     pub(crate) fn set_speed(&mut self, speed: f32, now: Instant) {
         if !speed.is_finite() {
             return;
@@ -220,6 +257,10 @@ impl Playback {
         }
     }
 
+    /// Delay until the next animation redraw or automatic tick, if either exists.
+    ///
+    /// Transitions request frames about every 16 ms; idle paused playback has no
+    /// deadline. A due tick returns a zero delay rather than advancing here.
     pub(crate) fn next_frame_delay(&self, now: Instant) -> Option<Duration> {
         if let Some(started_at) = self.transition_started_at {
             let remaining = self
@@ -274,6 +315,7 @@ impl Playback {
         }
     }
 
+    /// Apply whole completed groups and the partial current group from scratch.
     fn rebuild_position(&mut self, solution: &Solution) {
         let mut counter = initial_counter(solution);
         let mut completed_ticks = 0_u64;
@@ -309,6 +351,10 @@ impl Playback {
         }
     }
 
+    /// Capture exact starting values before mutation and bound animation length.
+    ///
+    /// A transition takes at most 180 ms or 72% of a tick interval, leaving it
+    /// time to finish before the next automatically scheduled operation.
     fn begin_transition(&mut self, now: Instant) {
         self.previous_digits.copy_from_slice(self.counter.values());
         self.previous_reset_index = self.counter.reset_index();
@@ -317,6 +363,7 @@ impl Playback {
         self.transition_duration = MAX_TRANSITION.min(self.tick_interval().mul_f32(0.72));
     }
 
+    /// Choose visual directions for replay or rewind, keeping unchanged digits still.
     fn set_directions(&mut self, action: Action, reverse: bool) {
         let forward = if reverse {
             RollDirection::Backward
@@ -351,6 +398,7 @@ impl Playback {
     }
 }
 
+/// Restore a counter from the validated starting digits and reset index.
 fn initial_counter(solution: &Solution) -> TallyCounter {
     let mut counter = TallyCounter::new(solution.start.len())
         .expect("A solution retains a validated counter width");

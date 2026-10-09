@@ -1,3 +1,15 @@
+//! Browser transport for a dedicated solver Web Worker.
+//!
+//! A new worker is created for each job. Its `ready` handshake precedes the
+//! `search-v1` request, and `update-v1` responses become Iced task updates.
+//! The worker measures elapsed time after receiving the request, so module
+//! loading and message delivery do not contribute to reported solver time.
+//!
+//! Counts use validated JavaScript integers; action ticks and other `u64`
+//! counters use decimal strings to preserve values beyond JavaScript's exact
+//! numeric range. Dropping [`Control`] terminates the worker and closes its
+//! update stream, including during startup.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -39,6 +51,10 @@ impl Drop for Control {
     }
 }
 
+/// Create a worker and return its lifetime handle and decoded update stream.
+///
+/// The request is sent once, after Rust has installed its worker-side handler.
+/// Startup and protocol failures are surfaced as terminal stream errors.
 pub fn start(counter: TallyCounter, target: Vec<u8>) -> (Control, Task<Response>) {
     let (sender, receiver) = mpsc::unbounded();
     let sender = Rc::new(RefCell::new(Some(sender)));
@@ -119,6 +135,7 @@ pub fn start(counter: TallyCounter, target: Vec<u8>) -> (Control, Task<Response>
     (control, Task::stream(receiver))
 }
 
+/// Resolve the bootstrap against the document base URL, including Pages subpaths.
 fn create_worker() -> Result<Worker, String> {
     let base = web_sys::window()
         .and_then(|window| window.document())
@@ -133,6 +150,7 @@ fn create_worker() -> Result<Worker, String> {
         .map_err(|error| format!("Unable to start the background solver: {}", js_error(error)))
 }
 
+/// Forward progress while closing the stream after its first terminal update.
 fn publish(sender: &Sender, update: Response) {
     let complete = !matches!(
         update,
@@ -151,6 +169,11 @@ fn publish(sender: &Sender, update: Response) {
     }
 }
 
+/// Validate the versioned response and pair its result with worker telemetry.
+///
+/// Bootstrap errors are also accepted because WASM can fail before the worker
+/// installs its versioned protocol. In-progress counts must agree with the
+/// accompanying statistics snapshot.
 fn decode_update(data: JsValue) -> Response {
     if !Array::is_array(&data) {
         return Err("The background solver returned an invalid response.".to_owned());
@@ -237,6 +260,7 @@ fn decode_update(data: JsValue) -> Response {
     })
 }
 
+/// Decode the fixed field order shared with the worker's response encoder.
 fn decode_statistics(data: JsValue) -> Result<SearchStatistics, String> {
     if !Array::is_array(&data) {
         return Err("The background solver returned invalid statistics.".to_owned());
@@ -258,6 +282,7 @@ fn decode_statistics(data: JsValue) -> Result<SearchStatistics, String> {
     })
 }
 
+/// Accept only exact, nonnegative JavaScript integers that also fit `usize`.
 fn decode_count(value: JsValue) -> Result<usize, String> {
     value
         .as_f64()
@@ -270,6 +295,7 @@ fn decode_count(value: JsValue) -> Result<usize, String> {
         .ok_or_else(|| "The background solver returned an invalid group count.".to_owned())
 }
 
+/// Decode decimal strings without passing exact Rust counters through `f64`.
 fn decode_u64(value: JsValue) -> Result<u64, String> {
     value
         .as_string()

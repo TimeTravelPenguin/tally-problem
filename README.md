@@ -79,11 +79,19 @@ Once it finds a solution, it reconstructs the steps and groups consecutive
 actions for display. There is no fixed digit limit, though difficult patterns
 can still take a long time.
 
+If a target contains all ten digits, the solver skips its mandatory final stretch
+of increments and adds them to the result afterwards. It also calculates a
+guaranteed minimum increment count from the digit pattern and shows that bound
+during the search. This describes the solution cost, rather than completion time.
+
 The interface shows elapsed time and the number of increments currently being
 checked. When measured search timings support a useful prediction, it also shows
 an estimated percentage and remaining time. Estimates can adjust as more work is
 discovered; uncertain cases show an activity bar instead. 100% means the search
 has finished.
+
+For the full problem definition, proofs, bounds, algorithm, and progress model,
+see [Mathematics and solver details](docs/mathematics-and-solver.md).
 
 ## Use as a Library
 

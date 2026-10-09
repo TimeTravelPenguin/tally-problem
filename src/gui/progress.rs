@@ -1,3 +1,11 @@
+//! Honest search milestones alongside deliberately limited timing predictions.
+//!
+//! The mathematical increment lower bound describes the solution, independently
+//! of the computer's speed. The percentage and ETA instead use a calibrated
+//! diagram-work prior and recent worker measurements. Warmup, rate stability,
+//! and extrapolation checks withdraw uncertain predictions in favor of elapsed
+//! time and an activity indicator. A solution-cost bound is never a work total.
+
 use std::{collections::VecDeque, time::Duration};
 
 use tally_problem::{SearchStatistics, TallyCounter, increment_lower_bound};
@@ -37,6 +45,7 @@ struct Sample {
 }
 
 impl ProgressEstimate {
+    /// Prepare the input's guaranteed cost bound and optional calibrated work prior.
     pub(crate) fn new(counter: &TallyCounter, target: &[u8]) -> Self {
         let initial_work = estimate_work(counter.values(), target);
 
@@ -60,6 +69,7 @@ impl ProgressEstimate {
         self.minimum_increments
     }
 
+    /// Accept a monotonic worker snapshot and revise the work prior conservatively.
     pub(crate) fn update(&mut self, statistics: SearchStatistics, elapsed: Duration) {
         if elapsed < self.elapsed || statistics.diagram_work < self.latest.diagram_work {
             return;
@@ -110,6 +120,10 @@ impl ProgressEstimate {
         }
     }
 
+    /// Predict only after warmup when recent and overall work rates are compatible.
+    ///
+    /// Returns `None` outside calibrated cases, after the prior is exhausted, or
+    /// when measurements are unstable. Percentages stay below 100 until solved.
     pub(crate) fn prediction(&self) -> Option<TimingPrediction> {
         if self.exceeded
             || self.elapsed < WARMUP
@@ -173,6 +187,7 @@ impl ProgressEstimate {
     }
 }
 
+/// Input-dependent total-work prior for the measured one-to-seven-wheel patterns.
 fn estimate_work(initial: &[u8], target: &[u8]) -> Option<f64> {
     // Calibration covers one through seven wheels, with equal starting digits.
     // Unknown patterns should get an activity indicator rather than a percentage.

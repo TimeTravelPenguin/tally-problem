@@ -1,3 +1,11 @@
+//! Keyboard routing and visibility operations for the GUI's manual focus order.
+//!
+//! [`keyboard_gate`] prevents an unfocused control from consuming keys intended
+//! for another control. [`reveal`] inspects widget bounds inside the root
+//! `planner-page` scrollable and proposes an absolute vertical offset. The
+//! application applies that offset only if its focus revision is still current,
+//! so delayed operations cannot undo a newer navigation action.
+
 use iced::advanced::widget::{
     Id, Operation, operate,
     operation::{Focusable, Outcome, Scrollable},
@@ -7,6 +15,9 @@ use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, overlay, r
 use iced::{Element, Event, Length, Rectangle, Size, Task, Vector, keyboard};
 
 /// Keep hovered controls from handling keys intended for another focused input.
+///
+/// When disabled, only key presses and releases are withheld. Pointer events,
+/// layout, widget state, and overlays continue through the wrapped widget.
 pub fn keyboard_gate<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
     enabled: bool,
@@ -17,6 +28,7 @@ pub fn keyboard_gate<'a, Message: 'a>(
     })
 }
 
+/// A transparent widget wrapper with an optional keyboard event boundary.
 struct KeyboardGate<'a, Message, Theme, Renderer>
 where
     Renderer: renderer::Renderer,
@@ -144,6 +156,10 @@ where
     }
 }
 
+/// Find the page offset needed to bring a widget ID into view with some padding.
+///
+/// Returns `None` when the target is missing or already visible. This task does
+/// not scroll by itself; the caller decides whether the result is still current.
 pub fn reveal(target: &'static str) -> Task<Option<f32>> {
     operate(Reveal {
         target: target.into(),
@@ -152,6 +168,7 @@ pub fn reveal(target: &'static str) -> Task<Option<f32>> {
     })
 }
 
+/// Collect the target bounds and root page translation during a widget traversal.
 struct Reveal {
     target: Id,
     page: Option<(Rectangle, f32)>,
@@ -196,6 +213,7 @@ impl Operation<Option<f32>> for Reveal {
     }
 }
 
+/// Choose the smallest vertical correction, aligning oversized targets at the top.
 fn visible_offset(viewport: Rectangle, offset: f32, target: Rectangle) -> Option<f32> {
     const PADDING: f32 = 16.0;
     let visible_top = viewport.y + offset + PADDING;

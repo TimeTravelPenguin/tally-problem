@@ -1,3 +1,21 @@
+//! Exact shortest paths through compact sets of counter displays.
+//!
+//! The solver runs Dijkstra's algorithm backwards from every acceptable final
+//! reset index, ordering costs by increments first and reset ticks second.
+//! The decision diagram shares digit patterns within each cost/index group instead of
+//! allocating the full decimal state space. Settled sets prevent repeated work;
+//! retained cost regions allow the winning path to be reconstructed forwards.
+//!
+//! Targets containing all ten digits have a mandatory final increment stretch.
+//! The solver removes that stretch before searching and appends it afterwards,
+//! preserving both optimality criteria. [`increment_lower_bound`] supplies a
+//! separate, guaranteed bound useful for reporting search milestones, rather
+//! than predicting how much computation remains.
+//!
+//! [`SearchSession`] exposes bounded batches for background execution, snapshots
+//! of work, and prompt release of diagram storage when the search ends. Sharing
+//! improves many puzzles but does not remove exponential worst cases.
+
 use std::{cmp::Reverse, collections::BinaryHeap};
 
 mod bounds;
@@ -13,17 +31,27 @@ use crate::TallyCounter;
 /// Invalid search input or insufficient storage for the explored patterns.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SearchError {
+    /// The counter has no digit wheels.
     #[error("Invalid digit count: {0}. Value should be greater than 0.")]
     InvalidDigitCount(usize),
+    /// The target's width differs from the counter's, including leading zeros.
     #[error("Invalid target length: expected {expected}, got {actual}")]
-    InvalidTargetLength { expected: usize, actual: usize },
+    InvalidTargetLength {
+        /// Number of wheels in the initial counter.
+        expected: usize,
+        /// Number of digits supplied for the target.
+        actual: usize,
+    },
+    /// A target element is outside the decimal digit range.
     #[error("Invalid target digit: {0}. Value should be in the range 0-9.")]
     InvalidTargetDigit(u8),
     /// Retained for compatibility; the symbolic solver has no numeric width limit.
     #[error("Counter length too large: {0}")]
     CounterLengthTooLarge(usize),
+    /// The required action count or accumulated cost exceeds `u64`.
     #[error("The optimal sequence is too long to represent")]
     CostTooLarge,
+    /// A fallible search allocation or diagram node identifier is exhausted.
     #[error("Unable to allocate memory for the search")]
     AllocationFailed,
 }
@@ -31,8 +59,11 @@ pub enum SearchError {
 /// A group of consecutive operations of the same kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    /// Add the given amount with decimal carry and fixed-width wraparound.
     Increment(u64),
+    /// Advance the knob and any wheels it engages by the given tick count.
     ResetForward(u64),
+    /// Move only the knob backwards by the given tick count.
     ResetBackward(u64),
 }
 
@@ -53,6 +84,8 @@ pub enum SearchResult {
     /// An optimal sequence, with consecutive operations grouped by kind.
     /// The sequence is empty when the counter already displays the target.
     Found(Vec<Action>),
+    /// The explored frontier exhausted without reaching the initial state.
+    /// Valid decimal puzzles are reachable; retained for result compatibility.
     NotFound,
 }
 
@@ -62,8 +95,10 @@ pub enum SearchProgress {
     /// More work remains. Each visited state group may represent many concrete
     /// counter states. The field name is retained for API compatibility.
     InProgress {
+        /// Nonempty symbolic groups visited so far, rather than individual displays.
         visited_states: usize,
     },
+    /// A terminal outcome; later session advances return this same result.
     Complete(SearchResult),
 }
 
@@ -96,6 +131,7 @@ pub struct SearchSession {
     statistics: SearchStatistics,
 }
 
+/// Lifecycle separates active buffers from the lightweight terminal outcome.
 #[derive(Debug)]
 enum SessionState {
     Searching(Box<ActiveSearch>),
@@ -103,6 +139,7 @@ enum SessionState {
     Failed(SearchError),
 }
 
+/// Reverse frontier and exact cost regions used to reconstruct a winning path.
 #[derive(Debug)]
 struct ActiveSearch {
     initial: TallyCounter,
@@ -118,9 +155,9 @@ struct ActiveSearch {
     cost_exceeded: bool,
 }
 
+/// Lexicographic path cost; field order makes increment optimality primary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Cost {
-    // Field order is important: derived Ord is lexicographic.
     increments: u64,
     reset_ticks: u64,
 }
@@ -159,6 +196,12 @@ impl Cost {
 /// shares sets of digit combinations instead of allocating every possible state.
 /// Storage depends on the patterns explored; difficult inputs can still require
 /// exponential work. There is no numeric counter-width limit.
+/// This function blocks until completion; use [`SearchSession`] on a background
+/// worker to report progress or support cancellation.
+///
+/// # Errors
+///
+/// Returns target validation, cost overflow, or fallible allocation errors.
 pub fn search(counter: &TallyCounter, target: &[u8]) -> Result<SearchResult, SearchError> {
     let mut session = SearchSession::new(counter, target)?;
 
@@ -346,6 +389,11 @@ impl SearchSession {
     /// processing time varies with its diagram size. Run CPU work on a worker
     /// thread for a responsive interface. A zero budget only observes progress.
     /// Completion releases search buffers and subsequent calls retain the result.
+    ///
+    /// # Errors
+    ///
+    /// Allocation and unrepresentable-cost failures become terminal; later calls
+    /// return the same error without retaining the active search buffers.
     pub fn advance(&mut self, max_states: usize) -> Result<SearchProgress, SearchError> {
         let progress = match &mut self.state {
             SessionState::Searching(search) => {
@@ -372,6 +420,7 @@ impl SearchSession {
 }
 
 impl ActiveSearch {
+    /// Snapshot counters, accounting for the compressed tail in reported costs.
     fn statistics(&self) -> SearchStatistics {
         let cost = self.cache_cost.unwrap_or(Cost::ZERO);
 
@@ -385,6 +434,10 @@ impl ActiveSearch {
         }
     }
 
+    /// Settle cost-ordered groups and expand inverse counter transitions.
+    ///
+    /// Already settled words are removed before recording a region. The first
+    /// region containing the initial display/index has the globally optimal cost.
     fn advance(&mut self, max_states: usize) -> Result<SearchProgress, SearchError> {
         for _ in 0..max_states {
             let Some(Reverse((cost, reset))) = self.queue.pop() else {
@@ -446,6 +499,7 @@ impl ActiveSearch {
         })
     }
 
+    /// Preserve frontier, settled, and replay roots across diagram compaction.
     fn collect_diagram(&mut self) -> Result<(), SearchError> {
         let roots = self
             .settled
@@ -469,6 +523,10 @@ impl ActiveSearch {
         Ok(())
     }
 
+    /// Merge words with the same cost/index into a single pending queue entry.
+    ///
+    /// Costs exceeding the representable total are skipped, allowing other paths
+    /// at the same increment layer to finish before reporting overflow.
     fn enqueue(&mut self, cost: Cost, reset: u8, root: NodeId) -> Result<(), SearchError> {
         if root == EMPTY {
             return Ok(());
@@ -499,6 +557,10 @@ impl ActiveSearch {
         Ok(())
     }
 
+    /// Replay successors whose recorded remaining cost drops by one operation.
+    ///
+    /// Exact region membership replaces per-word parent pointers. Adjacent equal
+    /// action kinds are combined, including the mandatory final increment tail.
     fn reconstruct(&self, mut cost: Cost) -> Result<Vec<Action>, SearchError> {
         let mut counter = self.initial.clone();
         let mut result = Vec::new();
@@ -550,6 +612,7 @@ impl ActiveSearch {
         Ok(result)
     }
 
+    /// Whether a concrete display/index belongs to an exact remaining-cost region.
     fn includes(&self, cost: Cost, counter: &TallyCounter) -> bool {
         self.regions
             .get(&(cost, counter.reset_index()))
@@ -557,6 +620,7 @@ impl ActiveSearch {
     }
 }
 
+/// Append an operation, extending the last group when its action kind matches.
 fn combine_action(result: &mut Vec<Action>, action: Action) -> Result<(), SearchError> {
     match (result.last_mut(), action) {
         (Some(Action::Increment(total)), Action::Increment(ticks))
